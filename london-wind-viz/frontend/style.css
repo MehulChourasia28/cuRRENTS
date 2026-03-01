@@ -1,0 +1,95 @@
+/* ── reset ── */
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:#0a0a14}
+
+#cesiumContainer{width:100%;height:100%}
+
+/* ── panel ── */
+#panel{
+  position:absolute;top:16px;right:16px;width:250px;
+  background:rgba(12,12,22,.92);
+  backdrop-filter:blur(24px);
+  border:1px solid rgba(255,255,255,.07);
+  border-radius:16px;
+  padding:20px;color:#d4d4d4;
+  z-index:1000;
+  box-shadow:0 8px 40px rgba(0,0,0,.55);
+}
+#panel h2{
+  font-size:15px;font-weight:700;letter-spacing:.6px;
+  color:#fff;margin-bottom:16px;
+  padding-bottom:12px;
+  border-bottom:1px solid rgba(255,255,255,.08);
+}
+section{margin-bottom:14px}
+.sec-label{
+  display:block;font-size:10px;text-transform:uppercase;
+  letter-spacing:1.2px;color:rgba(255,255,255,.4);margin-bottom:6px;
+}
+.muted{font-size:11px;color:rgba(255,255,255,.3)}
+
+/* wind rose */
+#wind-rose{
+  display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-bottom:4px;
+}
+.wbtn{
+  background:rgba(255,255,255,.05);
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:8px;color:#999;
+  padding:5px 0;font-size:12px;font-weight:500;
+  cursor:pointer;transition:all .15s;text-align:center;
+}
+.wbtn:hover{background:rgba(90,150,255,.15);color:#fff}
+.wbtn.on{
+  background:rgba(70,130,255,.30);
+  border-color:rgba(70,130,255,.55);color:#fff;
+}
+
+/* sliders */
+input[type=range]{
+  -webkit-appearance:none;width:100%;height:4px;
+  background:rgba(255,255,255,.1);border-radius:2px;outline:none;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
+  background:#5090ff;cursor:pointer;
+  box-shadow:0 0 8px rgba(80,144,255,.45);
+}
+
+/* checkboxes */
+.row{display:flex;gap:16px}
+.row label{
+  font-size:13px;color:#bbb;display:flex;align-items:center;gap:5px;cursor:pointer;
+}
+input[type=checkbox]{accent-color:#5090ff}
+
+/* action button */
+.action-btn{
+  width:100%;padding:8px 0;border:none;border-radius:8px;
+  background:linear-gradient(135deg,#3a7bd5,#6dd5ed);
+  color:#fff;font-size:12px;font-weight:600;letter-spacing:.5px;
+  cursor:pointer;transition:opacity .15s;
+}
+.action-btn:hover{opacity:.85}
+.action-btn:disabled{opacity:.4;cursor:default}
+
+/* legend */
+#legend{margin-top:16px;padding-top:12px;border-top:1px solid rgba(255,255,255,.06)}
+.bar{
+  height:8px;border-radius:4px;
+  background:linear-gradient(to right,
+    #30123b,#4662d7,#36aaf9,#1ae4b6,
+    #72fe5e,#c8ef34,#faba39,#f66b19,
+    #ca2a04,#7a0403);
+}
+.labels{display:flex;justify-content:space-between;
+  font-size:9px;color:rgba(255,255,255,.3);
+  text-transform:uppercase;letter-spacing:1px;margin-top:3px}
+
+/* status */
+#status{margin-top:12px;font-size:10px;color:rgba(255,255,255,.25);text-align:center}
+
+/* hide default cesium widgets */
+.cesium-viewer-bottom{display:none!important}

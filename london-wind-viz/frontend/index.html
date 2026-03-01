@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>London Wind Visualisation</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Cesium.js"></script>
+  <link  href="https://cesium.com/downloads/cesiumjs/releases/1.119/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+  <link  href="/frontend/style.css" rel="stylesheet">
+</head>
+<body>
+  <div id="cesiumContainer"></div>
+
+  <!-- ─── control panel ─── -->
+  <div id="panel">
+    <h2>London Wind</h2>
+
+    <section>
+      <label class="sec-label">Wind Direction</label>
+      <div id="wind-rose"></div>
+      <span id="angle-label" class="muted">270° W</span>
+    </section>
+
+    <section>
+      <label class="sec-label">Opacity</label>
+      <input type="range" id="sl-opacity" min="0" max="100" value="80">
+    </section>
+
+    <section>
+      <label class="sec-label">Line Width</label>
+      <input type="range" id="sl-width" min="1" max="10" value="3">
+    </section>
+
+    <section class="row">
+      <label><input type="checkbox" id="ck-glow" checked> Glow</label>
+      <label><input type="checkbox" id="ck-particles"> Particles</label>
+    </section>
+
+    <section>
+      <button id="btn-scan" class="action-btn">Scan Tile Geometry</button>
+    </section>
+
+    <div id="legend">
+      <div class="bar"></div>
+      <div class="labels"><span>Slow</span><span>Fast</span></div>
+    </div>
+
+    <div id="status">Initialising …</div>
+  </div>
+
+  <script src="/frontend/app.js"></script>
+</body>
+</html>
