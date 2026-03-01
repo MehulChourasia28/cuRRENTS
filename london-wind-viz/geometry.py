@@ -254,10 +254,8 @@ def voxelize_from_heightmap(height_grid, sample_res):
 
 
 def save_heightmap_geometry(occupancy, sdf):
-    """Save heightmap-derived occupancy and SDF (no building list needed)."""
-    for d in (config.BUILDINGS_DIR, config.DOMAIN_DIR):
-        os.makedirs(d, exist_ok=True)
-
+    """Save heightmap-derived geometry to both the legacy paths AND the
+    domain-keyed cache so subsequent runs with the same area skip the scan."""
     payload = {
         "buildings": [],
         "source": "heightmap",
@@ -270,19 +268,31 @@ def save_heightmap_geometry(occupancy, sdf):
             "ground_ellipsoid_height": config.GROUND_ELLIPSOID_HEIGHT,
         },
     }
-    with open(os.path.join(config.BUILDINGS_DIR, "buildings.json"), "w") as f:
-        json.dump(payload, f)
 
-    np.save(os.path.join(config.DOMAIN_DIR, "occupancy.npy"), occupancy)
-    np.save(os.path.join(config.DOMAIN_DIR, "sdf.npy"), sdf)
-    print(f"  Heightmap geometry saved to {config.DATA_DIR}")
-
-
-# ── I/O helpers ─────────────────────────────────────────────────────
-def save_geometry(buildings, occupancy, sdf):
     for d in (config.BUILDINGS_DIR, config.DOMAIN_DIR):
         os.makedirs(d, exist_ok=True)
 
+    # Legacy location (used by load_geometry)
+    with open(os.path.join(config.BUILDINGS_DIR, "buildings.json"), "w") as f:
+        json.dump(payload, f)
+    np.save(os.path.join(config.DOMAIN_DIR, "occupancy.npy"), occupancy)
+    np.save(os.path.join(config.DOMAIN_DIR, "sdf.npy"), sdf)
+
+    # Persistent domain-keyed cache
+    cache = config.domain_cache_dir()
+    with open(os.path.join(cache, "buildings.json"), "w") as f:
+        json.dump(payload, f)
+    np.save(os.path.join(cache, "occupancy.npy"), occupancy)
+    np.save(os.path.join(cache, "sdf.npy"), sdf)
+
+    print(f"  Geometry saved to {config.DATA_DIR} + cache {cache}")
+
+
+# ── I/O helpers ─────────────────────────────────────────────────────
+
+def save_geometry(buildings, occupancy, sdf):
+    for d in (config.BUILDINGS_DIR, config.DOMAIN_DIR):
+        os.makedirs(d, exist_ok=True)
     payload = {
         "buildings": buildings,
         "domain": {
@@ -295,17 +305,41 @@ def save_geometry(buildings, occupancy, sdf):
     }
     with open(os.path.join(config.BUILDINGS_DIR, "buildings.json"), "w") as f:
         json.dump(payload, f)
-
     np.save(os.path.join(config.DOMAIN_DIR, "occupancy.npy"), occupancy)
     np.save(os.path.join(config.DOMAIN_DIR, "sdf.npy"), sdf)
     print(f"  Geometry saved to {config.DATA_DIR}")
 
 
 def load_geometry():
+    """Load from the legacy location."""
     with open(os.path.join(config.BUILDINGS_DIR, "buildings.json")) as f:
         data = json.load(f)
     occ = np.load(os.path.join(config.DOMAIN_DIR, "occupancy.npy"))
     sdf = np.load(os.path.join(config.DOMAIN_DIR, "sdf.npy"))
+    return data, occ, sdf
+
+
+def load_cached_geometry():
+    """Load from the domain-keyed cache and also copy to the legacy paths."""
+    cache = config.domain_cache_dir()
+    with open(os.path.join(cache, "buildings.json")) as f:
+        data = json.load(f)
+    occ = np.load(os.path.join(cache, "occupancy.npy"))
+    sdf = np.load(os.path.join(cache, "sdf.npy"))
+
+    # Restore ground height
+    geh = data.get("domain", {}).get("ground_ellipsoid_height")
+    if geh is not None:
+        config.GROUND_ELLIPSOID_HEIGHT = geh
+
+    # Copy to legacy paths so the rest of the pipeline works unchanged
+    for d in (config.BUILDINGS_DIR, config.DOMAIN_DIR):
+        os.makedirs(d, exist_ok=True)
+    with open(os.path.join(config.BUILDINGS_DIR, "buildings.json"), "w") as f:
+        json.dump(data, f)
+    np.save(os.path.join(config.DOMAIN_DIR, "occupancy.npy"), occ)
+    np.save(os.path.join(config.DOMAIN_DIR, "sdf.npy"), sdf)
+
     return data, occ, sdf
 
 

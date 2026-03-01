@@ -397,17 +397,37 @@ def save(data, wind_deg):
 # Top-level runner
 # ═══════════════════════════════════════════════════════════════════
 
-def run(occupancy, predict_fn):
-    """Generate streamlines for all configured wind directions.
+def run_from_field(occupancy, coords, vel, shape):
+    """Compute streamlines from a pre-computed (averaged) velocity field
+    and save as ``streamlines_combined.json``."""
+    print("\n── Combined averaged wind field ──")
+    sls = compute(coords, vel, shape, occupancy, 0)
+    data = to_cesium_json(sls, 0)
 
-    Parameters
-    ----------
-    occupancy : ndarray
-        3-D occupancy grid.
-    predict_fn : callable
-        ``predict_fn(angle_deg) → (coords, vel, shape)``.
-    """
-    for deg in config.WIND_DIRECTIONS:
+    os.makedirs(config.STREAMLINE_DIR, exist_ok=True)
+    path = os.path.join(config.STREAMLINE_DIR, "streamlines_combined.json")
+    with open(path, "w") as f:
+        json.dump(data, f)
+    print(f"    Saved → {path}  ({len(sls)} streamlines)")
+
+    meta = {
+        "type": "combined",
+        "domain": {
+            "center_lat": config.DOMAIN_CENTER_LAT,
+            "center_lon": config.DOMAIN_CENTER_LON,
+            "half_x": config.DOMAIN_HALF_X,
+            "half_y": config.DOMAIN_HALF_Y,
+            "height": config.DOMAIN_HEIGHT,
+        },
+    }
+    with open(os.path.join(config.STREAMLINE_DIR, "metadata.json"), "w") as f:
+        json.dump(meta, f)
+
+
+def run(occupancy, predict_fn):
+    """Generate streamlines per-direction (legacy interface)."""
+    angles = getattr(config, "WIND_DIRECTIONS", [0, 270])
+    for deg in angles:
         print(f"\n── Wind {deg}° ──")
         coords, vel, shape = predict_fn(deg)
         sls = compute(coords, vel, shape, occupancy, deg)
@@ -415,7 +435,7 @@ def run(occupancy, predict_fn):
         save(data, deg)
 
     meta = {
-        "available_angles": config.WIND_DIRECTIONS,
+        "available_angles": angles,
         "domain": {
             "center_lat": config.DOMAIN_CENTER_LAT,
             "center_lon": config.DOMAIN_CENTER_LON,

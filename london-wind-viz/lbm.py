@@ -143,14 +143,20 @@ def _build_boundary_conditions(grid, vs, occupancy, wind_angle_deg, grid_shape):
     return bcs_list
 
 
-def solve_wind(occupancy, wind_angle_deg, grid_res=None, num_steps=None):
-    """Run the LBM solver in a **subprocess** to avoid XLB/Warp kernel-cache
-    conflicts when solving multiple wind directions in the same session.
+def solve_wind(occupancy, wind_angle_deg, wind_speed_ms=None,
+               grid_res=None, num_steps=None):
+    """Run the LBM solver in a **subprocess**.
+
+    Parameters
+    ----------
+    wind_speed_ms : float, optional
+        Physical wind speed in m/s for this solve.  Defaults to config.WIND_SPEED.
 
     Returns (coords_m, velocities_m_s, (nx, ny, nz)).
     """
     grid_res = grid_res or config.LBM_GRID_RES
     num_steps = num_steps or _N_STEPS
+    wind_speed_ms = wind_speed_ms or config.WIND_SPEED
     occ_path = os.path.join(config.DOMAIN_DIR, "occupancy.npy")
     np.save(occ_path, occupancy)
 
@@ -163,7 +169,7 @@ def solve_wind(occupancy, wind_angle_deg, grid_res=None, num_steps=None):
     proc = subprocess.run(
         [sys.executable, script,
          str(wind_angle_deg), str(grid_res), str(num_steps),
-         occ_path, out_dir],
+         str(wind_speed_ms), occ_path, out_dir],
         capture_output=False,
         env=sub_env,
     )
@@ -174,25 +180,26 @@ def solve_wind(occupancy, wind_angle_deg, grid_res=None, num_steps=None):
     vel = np.load(os.path.join(out_dir, "vel.npy"))
     shape = tuple(np.load(os.path.join(out_dir, "shape.npy")))
 
-    # If the solve produced all-zero velocity (rare XLB cache collision),
-    # mirror the solution from the opposite diagonal direction.
     speed = np.linalg.norm(vel, axis=1)
     if speed.max() < 1e-6:
         mirror_angle = (wind_angle_deg + 180) % 360
         print(f"    ⚠ Zero velocity at {wind_angle_deg}° — mirroring from {mirror_angle}°")
-        coords_m, vel_m, shape = solve_wind(occupancy, mirror_angle, grid_res, num_steps)
+        coords_m, vel_m, shape = solve_wind(
+            occupancy, mirror_angle, wind_speed_ms, grid_res, num_steps)
         vel = -vel_m
 
     return coords_m, vel, shape
 
 
-def _solve_wind_inproc(occupancy, wind_angle_deg, grid_res=None, num_steps=None):
+def _solve_wind_inproc(occupancy, wind_angle_deg, grid_res=None,
+                       num_steps=None, wind_speed_ms=None):
     """In-process LBM solve (called by the subprocess entry point below)."""
     import warp as wp
     from xlb.operator.stepper import IncompressibleNavierStokesStepper
 
-    grid_res = grid_res or config.LBM_GRID_RES   # reuse the same 4 m grid
+    grid_res = grid_res or config.LBM_GRID_RES
     num_steps = num_steps or _N_STEPS
+    wind_speed_ms = wind_speed_ms or config.WIND_SPEED
 
     nx = int(2 * config.DOMAIN_HALF_X / grid_res)
     ny = int(2 * config.DOMAIN_HALF_Y / grid_res)
@@ -250,7 +257,7 @@ def _solve_wind_inproc(occupancy, wind_angle_deg, grid_res=None, num_steps=None)
     uz = np.nan_to_num(uz, nan=0.0)
 
     # Convert lattice units → physical m/s
-    phys_scale = config.WIND_SPEED / _U_LATTICE
+    phys_scale = wind_speed_ms / _U_LATTICE
     vel = np.stack([ux.ravel() * phys_scale,
                     uy.ravel() * phys_scale,
                     uz.ravel() * phys_scale], axis=1).astype(np.float32)
@@ -280,11 +287,13 @@ if __name__ == "__main__":
     angle_deg = float(sys.argv[1])
     grid_res = float(sys.argv[2])
     num_steps = int(sys.argv[3])
-    occ_path = sys.argv[4]
-    out_dir = sys.argv[5]
+    wind_speed_ms = float(sys.argv[4])
+    occ_path = sys.argv[5]
+    out_dir = sys.argv[6]
 
     occ = np.load(occ_path)
-    coords, vel, shape = _solve_wind_inproc(occ, angle_deg, grid_res, num_steps)
+    coords, vel, shape = _solve_wind_inproc(
+        occ, angle_deg, grid_res, num_steps, wind_speed_ms)
 
     np.save(os.path.join(out_dir, "coords.npy"), coords)
     np.save(os.path.join(out_dir, "vel.npy"), vel)
