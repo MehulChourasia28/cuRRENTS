@@ -38,7 +38,7 @@ OPENWEATHER_API_KEY = os.environ.get("OPEN_WEATHER_API_KEY", "")
 CESIUM_ION_TOKEN = os.environ.get("CESIUM_ION_TOKEN", "")
 
 # ===================== Nemotron / NIM =============================
-NEMOTRON_TARGET = 15
+NEMOTRON_TARGET = 3
 NEMOTRON_THRESHOLD = 0.7
 
 # ===================== Streamline Configuration ====================
@@ -65,8 +65,8 @@ DRONE_CD = 0.5                 # drag coefficient
 ROUTING_GRID_RES = 8.0         # metres – coarser grid for pathfinding
 CUOPT_TIME_LIMIT = 5           # seconds allowed for cuOpt solver
 NUM_ROUTE_WAYPOINTS = 80       # candidate intermediate waypoints
-WIND_COST_ALPHA = 1.5          # headwind penalty weight
-WIND_COST_BETA = 0.8           # speed-magnitude penalty weight
+WIND_COST_ALPHA = 0.4           # headwind penalty weight
+WIND_COST_BETA = 0.25          # speed-magnitude penalty weight
 CUOPT_ENDPOINT = "https://optimize.api.nvidia.com/v1/nvidia/cuopt"
 
 # ===================== Heightmap Sampling ==========================

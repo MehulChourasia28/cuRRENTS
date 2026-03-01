@@ -10,6 +10,31 @@ const routePrimitives = [];
 const routeEntities = [];
 
 // ═════════════════════════════════════════════════════════════════════
+// Presets
+// ═════════════════════════════════════════════════════════════════════
+
+const PRESETS = [
+  { name: "Custom", origin: null },
+  { name: "Leadenhall → Heron Tower",
+    origin: "51.5130, -0.0830", dest: "51.5158, -0.0805", oh: 100, dh: 110 },
+  { name: "Royal Exchange → Gherkin",
+    origin: "51.5128, -0.0850", dest: "51.5150, -0.0800", oh: 90, dh: 100 },
+  { name: "Liverpool St → Bishopsgate",
+    origin: "51.5180, -0.0835", dest: "51.5145, -0.0810", oh: 100, dh: 110 },
+  { name: "Tower 42 → The Scalpel",
+    origin: "51.5160, -0.0820", dest: "51.5130, -0.0815", oh: 95, dh: 100 },
+];
+
+// ═════════════════════════════════════════════════════════════════════
+// Pipeline progress stepper
+// ═════════════════════════════════════════════════════════════════════
+
+const PIPELINE_STAGES = ["scanning", "cache", "wind", "nemotron", "lbm", "streamlines", "routing", "cuopt"];
+const STAGE_TO_STEP = {
+  scanning: 0, cache: 0, wind: 1, nemotron: 2, lbm: 3, streamlines: 4, routing: 5, cuopt: 5,
+};
+
+// ═════════════════════════════════════════════════════════════════════
 // Bootstrap
 // ═════════════════════════════════════════════════════════════════════
 
@@ -43,8 +68,7 @@ async function boot() {
 
   flyTo(cfg.center_lat, cfg.center_lon);
   wireControls();
-  loadCombinedStreamlines();
-  loadRoutes();
+  document.getElementById("ck-particles").checked = true;
   viewer.scene.preRender.addEventListener(tick);
 }
 
@@ -71,6 +95,69 @@ function wireControls() {
   document.getElementById("sl-width").oninput = rebuildStreamlines;
   document.getElementById("ck-glow").onchange = rebuildStreamlines;
   document.getElementById("ck-particles").onchange = rebuildStreamlines;
+  document.getElementById("preset-route").onchange = applyPreset;
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// Preset handling
+// ═════════════════════════════════════════════════════════════════════
+
+function applyPreset() {
+  const sel = document.getElementById("preset-route");
+  const idx = sel.selectedIndex;
+  const fields = document.getElementById("coord-inputs-section");
+
+  if (idx === 0) {
+    if (fields) fields.classList.remove("hidden");
+    return;
+  }
+
+  const p = PRESETS[idx];
+  if (!p || !p.origin) return;
+
+  document.getElementById("inp-origin").value = p.origin;
+  document.getElementById("inp-dest").value = p.dest;
+  document.getElementById("inp-origin-h").value = String(p.oh ?? 30);
+  document.getElementById("inp-dest-h").value = String(p.dh ?? 30);
+
+  if (fields) fields.classList.add("hidden");
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// Pipeline progress UI
+// ═════════════════════════════════════════════════════════════════════
+
+function showPipelineProgress() {
+  const div = document.getElementById("pipeline-progress");
+  if (!div) return;
+  div.classList.remove("hidden");
+  const steps = div.querySelectorAll(".step");
+  steps.forEach((s) => {
+    s.classList.remove("done", "active");
+  });
+}
+
+function setPipelineStep(stageKey) {
+  const stepIdx = STAGE_TO_STEP[stageKey] ?? -1;
+  const div = document.getElementById("pipeline-progress");
+  if (!div) return;
+  const steps = div.querySelectorAll(".step");
+  steps.forEach((s, i) => {
+    s.classList.remove("done", "active");
+    if (i < stepIdx) s.classList.add("done");
+    else if (i === stepIdx) s.classList.add("active");
+  });
+}
+
+function hidePipelineProgress() {
+  const div = document.getElementById("pipeline-progress");
+  if (!div) return;
+  const steps = div.querySelectorAll(".step");
+  steps.forEach((s) => {
+    s.classList.remove("active");
+    s.classList.add("done");
+  });
+  setTimeout(() => { div.classList.add("hidden"); }, 1200);
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -93,6 +180,12 @@ async function analyzeRoute() {
 
   status("Setting domain …");
   document.getElementById("btn-analyze").disabled = true;
+  clearStreamlinePrimitives();
+  clearRoutes();
+  currentData = null;
+  routeData = null;
+  document.getElementById("route-results").classList.add("hidden");
+  showPipelineProgress();
 
   try {
     const r = await fetch("/api/coords", {
@@ -109,13 +202,18 @@ async function analyzeRoute() {
     cfg.domain_half_y = result.half_y;
 
     flyTo(result.center_lat, result.center_lon);
-    document.getElementById("btn-scan").disabled = false;
+
+    // Show origin + destination markers immediately
+    showInputMarkers(origin, dest, originH, destH);
 
     if (result.cached) {
-      status("Domain set (cached geometry). Pipeline starting …");
+      status("Cached geometry found. Pipeline starting …");
       pollPipeline();
+    } else if (tileset) {
+      status("Scanning tile geometry …");
+      await scanTileGeometry();
     } else {
-      status("Domain set. Now click Scan Tile Geometry.");
+      status("No tileset loaded. Click Scan Tile Geometry manually.");
     }
   } catch (e) {
     console.error(e);
@@ -123,6 +221,13 @@ async function analyzeRoute() {
   } finally {
     document.getElementById("btn-analyze").disabled = false;
   }
+}
+
+function showInputMarkers(origin, dest, originH, destH) {
+  clearRoutes();
+  const geh = (cfg && cfg.ground_ellipsoid_height) || 58;
+  addMarker([origin.lon, origin.lat, geh + originH], "A", Cesium.Color.fromCssColorString("#00d2ff"));
+  addMarker([dest.lon, dest.lat, geh + destH], "B", Cesium.Color.fromCssColorString("#76B900"));
 }
 
 // ═════════════════════════════════════════════════════════════════════
@@ -159,7 +264,7 @@ async function scanTileGeometry() {
     }
   }
 
-  const BATCH = 400;
+  const BATCH = 500;
   const heights = new Float64Array(total);
   for (let i = 0; i < total; i += BATCH) {
     const batch = positions.slice(i, Math.min(i + BATCH, total));
@@ -199,6 +304,8 @@ async function pollPipeline() {
       const r = await fetch("/api/pipeline-status");
       const s = await r.json();
       const stageLabels = {
+        scanning: "Scanning tile geometry",
+        cache: "Loading cached geometry",
         wind: "Fetching wind data",
         nemotron: "Nemotron scenario gen",
         lbm: "GPU fluid simulation",
@@ -208,12 +315,15 @@ async function pollPipeline() {
       };
       const label = stageLabels[s.stage] || s.stage;
       status(label + " — " + s.detail);
+      setPipelineStep(s.stage);
       if (s.stage === "done") {
+        hidePipelineProgress();
         await loadCombinedStreamlines();
         await loadRoutes();
         return;
       }
       if (s.stage === "error") {
+        hidePipelineProgress();
         status("Pipeline error: " + s.detail);
         return;
       }
@@ -355,17 +465,36 @@ function updateRouteUI() {
   document.getElementById("wind-time").textContent = Math.round(wr.time_s || 0);
   document.getElementById("wind-energy").textContent = (wr.energy_wh || 0).toFixed(1);
 
-  animateSavings(routeData.energy_savings_pct || 0);
+  const savings = routeData.energy_savings_pct || 0;
+  const badge = document.querySelector(".savings-badge");
+  const label = document.getElementById("savings-label");
+
+  if (savings >= 0) {
+    badge.classList.remove("savings-negative");
+    label.textContent = "energy saved";
+    animateSavings(savings);
+  } else {
+    badge.classList.add("savings-negative");
+    const windReduction = routeData.wind_reduction_pct || 0;
+    if (windReduction > 0) {
+      label.textContent = "wind exposure reduced";
+      animateSavings(windReduction);
+    } else {
+      label.textContent = "safer route (less turbulence)";
+      animateSavings(0);
+    }
+  }
 }
 
 function animateSavings(target) {
   const el = document.getElementById("savings-pct");
   let current = 0;
-  const step = Math.max(0.5, target / 40);
+  const absTarget = Math.abs(target);
+  const step = Math.max(0.5, absTarget / 40);
   const iv = setInterval(() => {
-    current = Math.min(current + step, target);
+    current = Math.min(current + step, absTarget);
     el.textContent = current.toFixed(1);
-    if (current >= target) clearInterval(iv);
+    if (current >= absTarget) clearInterval(iv);
   }, 30);
 }
 
@@ -428,13 +557,16 @@ function initParticles(data) {
   particles = [];
   pointCollection = new Cesium.PointPrimitiveCollection();
   viewer.scene.primitives.add(pointCollection);
-  const subset = data.streamlines.slice(0, 120);
+  const subset = data.streamlines.slice(0, 200);
   for (const sl of subset) {
     if (sl.num_points < 4) continue;
-    for (let p = 0; p < 4; p++) {
-      const pt = pointCollection.add({ position: Cesium.Cartesian3.ZERO, pixelSize: 5,
-        color: Cesium.Color.WHITE });
-      particles.push({ point: pt, sl, phase: p / 4, speed: 0.08 + Math.random() * 0.04 });
+    for (let p = 0; p < 6; p++) {
+      const pt = pointCollection.add({
+        position: Cesium.Cartesian3.ZERO,
+        pixelSize: 5,
+        color: new Cesium.Color(1, 1, 1, 0.8),
+      });
+      particles.push({ point: pt, sl, phase: p / 6, speed: 0.08 + Math.random() * 0.04 });
     }
   }
 }
@@ -450,8 +582,8 @@ function tick() {
     p.point.position = Cesium.Cartesian3.fromDegrees(
       p.sl.positions[idx*3], p.sl.positions[idx*3+1], p.sl.positions[idx*3+2]);
     p.point.color = new Cesium.Color(
-      p.sl.colors[idx*4]/255, p.sl.colors[idx*4+1]/255, p.sl.colors[idx*4+2]/255, 1.0);
-    p.point.pixelSize = 4 + (p.sl.colors[idx*4+3] / 255) * 4;
+      p.sl.colors[idx*4]/255, p.sl.colors[idx*4+1]/255, p.sl.colors[idx*4+2]/255, 0.8);
+    p.point.pixelSize = (4 + (p.sl.colors[idx*4+3] / 255) * 4) * (0.85 + 0.15 * Math.sin(_t * 3 + p.phase * 6.28));
   }
 }
 

@@ -59,7 +59,7 @@ def main():
         log.info("  STEP 1 · Waiting for coords from browser")
         log.info("=" * 60)
         log.info('  Open http://localhost:%d', config.SERVER_PORT)
-        log.info('  Enter origin/dest → Set Domain → Scan Tile Geometry')
+        log.info('  Enter origin/dest → Analyze Route')
 
         server.wait_for_coords()
         log.info("  Coords received: (%.5f, %.5f) ± %.0f×%.0f m",
@@ -73,7 +73,7 @@ def main():
             _, occupancy, _ = geometry.load_cached_geometry()
         else:
             log.info("  Cache MISS — waiting for heightmap scan from browser")
-            server.set_pipeline_status("scanning", "Click Scan Tile Geometry …")
+            server.set_pipeline_status("scanning", "Scanning tile geometry …")
             server.wait_for_heightmap()
             log.info("  Heightmap received and cached")
             occupancy = np.load(os.path.join(config.DOMAIN_DIR, "occupancy.npy"))

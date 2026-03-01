@@ -23,7 +23,7 @@ from typing import Optional
 import numpy as np
 import requests
 from scipy.interpolate import RegularGridInterpolator
-from scipy.ndimage import zoom
+from scipy.ndimage import distance_transform_edt, zoom
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
@@ -78,6 +78,8 @@ class _NavGraph:
         self._xs = np.linspace(-config.DOMAIN_HALF_X, config.DOMAIN_HALF_X, self.nx)
         self._ys = np.linspace(-config.DOMAIN_HALF_Y, config.DOMAIN_HALF_Y, self.ny)
         self._zs = np.linspace(0, config.DOMAIN_HEIGHT, self.nz)
+
+        self._bldg_dist = distance_transform_edt(~self.blocked).astype(np.float32)
 
         log.info("  NavGraph %dx%dx%d = %d nodes (%.0f%% blocked)",
                  self.nx, self.ny, self.nz, self.total,
@@ -150,15 +152,29 @@ class _NavGraph:
             headwind = -np.sum(wind * direction, axis=1)
             w_speed = np.linalg.norm(wind, axis=1)
             max_ws = max(config.WIND_SPEED, 1.0)
+
+            # Penalise headwinds and high wind speed (turbulence avoidance)
             hw_pen = np.clip(headwind, 0, None) / max_ws
             sp_pen = w_speed / max_ws
-            wind_cost = dist * (1.0
-                                + config.WIND_COST_ALPHA * hw_pen
-                                + config.WIND_COST_BETA * sp_pen)
+            # Give a small discount for tailwinds
+            tailwind_benefit = np.clip(-headwind, 0, None) / max_ws * 0.3
+            wind_cost = dist * np.clip(
+                1.0 + config.WIND_COST_ALPHA * hw_pen
+                + config.WIND_COST_BETA * sp_pen
+                - tailwind_benefit,
+                0.1, None)
+
+            src_bd = self._bldg_dist[free_ijk[idx_v, 0],
+                                     free_ijk[idx_v, 1],
+                                     free_ijk[idx_v, 2]]
+            dst_bd = self._bldg_dist[nb_v[:, 0], nb_v[:, 1], nb_v[:, 2]]
+            avg_bd = 0.5 * (src_bd + dst_bd)
+            prox_pen = np.clip(1.5 / (avg_bd + 1.0), 0.0, 1.5)
+            dist_with_prox = dist * (1.0 + prox_pen)
 
             all_rows.append(src_flat)
             all_cols.append(dst_flat)
-            all_dist.append(dist)
+            all_dist.append(dist_with_prox)
             all_wind.append(wind_cost)
 
         rows = np.concatenate(all_rows)
@@ -291,6 +307,94 @@ def _smooth_path(pts: np.ndarray, window: int = 5) -> np.ndarray:
     smoothed[0] = pts[0]
     smoothed[-1] = pts[-1]
     return smoothed
+
+
+def _validate_path(path: np.ndarray, graph: _NavGraph) -> np.ndarray:
+    """Ensure the smoothed path stays above buildings.
+
+    Checks each waypoint AND interpolated midpoints between consecutive
+    waypoints, pushing z upward when a voxel is occupied.  After lifting
+    midpoints a second pass re-checks all waypoints to propagate fixes.
+    """
+    res = graph.res
+
+    def _lift(pt):
+        ix, iy, iz = graph.nearest_ijk(pt)
+        if (0 <= ix < graph.nx and 0 <= iy < graph.ny
+                and 0 <= iz < graph.nz and graph.blocked[ix, iy, iz]):
+            for dz in range(1, 20):
+                trial_iz = min(iz + dz, graph.nz - 1)
+                if not graph.blocked[ix, iy, trial_iz]:
+                    pt[2] = graph._zs[trial_iz]
+                    return True
+        return False
+
+    for i in range(len(path)):
+        _lift(path[i])
+
+    new_pts = [path[0]]
+    for i in range(len(path) - 1):
+        seg = path[i + 1] - path[i]
+        seg_len = float(np.linalg.norm(seg))
+        n_sub = max(1, int(seg_len / res))
+        for s in range(1, n_sub):
+            mid = path[i] + seg * (s / n_sub)
+            if _lift(mid):
+                new_pts.append(mid.copy())
+        new_pts.append(path[i + 1])
+
+    result = np.array(new_pts)
+    for i in range(len(result)):
+        _lift(result[i])
+    return result
+
+
+def _validate_path_fine(path: np.ndarray, occupancy: np.ndarray) -> np.ndarray:
+    """Second-pass validation against the original fine-resolution occupancy.
+
+    Checks each point and its immediate XY neighbours (±1 voxel) to account
+    for coordinate rounding in the local-to-geo conversion.  Lifts by an
+    extra voxel beyond the first clear one for safety margin.
+    """
+    vox = config.VOXEL_RESOLUTION
+    hx = config.DOMAIN_HALF_X
+    hy = config.DOMAIN_HALF_Y
+    nxf, nyf, nzf = occupancy.shape
+
+    for i in range(len(path)):
+        cx = int((path[i][0] + hx) / vox)
+        cy = int((path[i][1] + hy) / vox)
+        cz = int(path[i][2] / vox)
+
+        blocked = False
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                ix = np.clip(cx + dx, 0, nxf - 1)
+                iy = np.clip(cy + dy, 0, nyf - 1)
+                iz = np.clip(cz, 0, nzf - 1)
+                if occupancy[ix, iy, iz]:
+                    blocked = True
+                    break
+            if blocked:
+                break
+
+        if blocked:
+            for dz in range(1, 30):
+                tz = min(cz + dz, nzf - 1)
+                clear = True
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        ix = np.clip(cx + dx, 0, nxf - 1)
+                        iy = np.clip(cy + dy, 0, nyf - 1)
+                        if occupancy[ix, iy, tz]:
+                            clear = False
+                            break
+                    if not clear:
+                        break
+                if clear:
+                    path[i][2] = (tz + 1) * vox
+                    break
+    return path
 
 
 # =====================================================================
@@ -554,6 +658,17 @@ def _local_to_lonlat(x, y):
             config.DOMAIN_CENTER_LAT + y * lat_per_m)
 
 
+def _wind_exposure(path: np.ndarray, graph: _NavGraph) -> tuple[float, float]:
+    """Return (peak_wind_ms, mean_wind_ms) along a path."""
+    if path is None or len(path) < 2:
+        return 0.0, 0.0
+    speeds = []
+    for i in range(len(path)):
+        w = graph.wind_at(path[i])
+        speeds.append(float(np.linalg.norm(w)))
+    return max(speeds), sum(speeds) / len(speeds)
+
+
 def _path_to_geo(path: np.ndarray) -> list[list[float]]:
     geo = []
     for p in path:
@@ -603,6 +718,8 @@ def compute_routes(occupancy: np.ndarray, vel: np.ndarray,
     dist_path = _astar(graph, s_ijk, g_ijk, use_wind=False)
     if dist_path is not None:
         dist_path = _smooth_path(dist_path)
+        dist_path = _validate_path(dist_path, graph)
+        dist_path = _validate_path_fine(dist_path, occupancy)
         dist_path[0] = origin_local
         dist_path[-1] = dest_local
         dist_energy = _compute_energy(dist_path, graph)
@@ -615,48 +732,98 @@ def compute_routes(occupancy: np.ndarray, vel: np.ndarray,
         dist_energy = {"energy_wh": 0, "distance_m": 0, "time_s": 0}
         dist_geo = []
 
-    # -- Wind-optimised route (cuOpt → A* fallback) ------------------
+    # -- Wind-optimised route (A* wind + cuOpt, pick best energy) -----
     log.info("Computing wind-optimised route …")
     wind_path = None
 
-    waypoints_ijk = [s_ijk] + _select_waypoints(
-        graph, s_ijk, g_ijk, config.NUM_ROUTE_WAYPOINTS) + [g_ijk]
-    origin_wp_idx = 0
-    dest_wp_idx = len(waypoints_ijk) - 1
+    # A* with wind-aware edge costs (always computed)
+    log.info("  A* with wind-aware costs …")
+    astar_wind_path = _astar(graph, s_ijk, g_ijk, use_wind=True)
+    astar_energy = None
+    if astar_wind_path is not None:
+        ap = _smooth_path(astar_wind_path)
+        ap = _validate_path(ap, graph)
+        ap = _validate_path_fine(ap, occupancy)
+        ap[0] = origin_local
+        ap[-1] = dest_local
+        astar_energy = _compute_energy(ap, graph)
+        log.info("    A* wind route: %.0fm, %.1fs, %.2f Wh",
+                 astar_energy["distance_m"], astar_energy["time_s"],
+                 astar_energy["energy_wh"])
 
+    # cuOpt waypoint optimisation (optional, compared with A*)
+    cuopt_energy = None
+    cuopt_wind_path = None
     if config.NIM_API_KEY:
+        waypoints_ijk = [s_ijk] + _select_waypoints(
+            graph, s_ijk, g_ijk, config.NUM_ROUTE_WAYPOINTS) + [g_ijk]
+        origin_wp_idx = 0
+        dest_wp_idx = len(waypoints_ijk) - 1
+
         log.info("  Building %d-waypoint cost matrix …", len(waypoints_ijk))
         cost_mat = _build_cost_matrix(graph, waypoints_ijk)
         cuopt_route = _call_cuopt(cost_mat, origin_wp_idx, dest_wp_idx)
         if cuopt_route is not None:
-            wind_path = _reconstruct_cuopt_route(
-                graph, waypoints_ijk, cuopt_route)
+            cp = _reconstruct_cuopt_route(graph, waypoints_ijk, cuopt_route)
+            if cp is not None:
+                cp = _smooth_path(cp)
+                cp = _validate_path(cp, graph)
+                cp = _validate_path_fine(cp, occupancy)
+                cp[0] = origin_local
+                cp[-1] = dest_local
+                cuopt_energy = _compute_energy(cp, graph)
+                cuopt_wind_path = cp
+                log.info("    cuOpt route: %.0fm, %.1fs, %.2f Wh",
+                         cuopt_energy["distance_m"], cuopt_energy["time_s"],
+                         cuopt_energy["energy_wh"])
 
-    if wind_path is None:
-        log.info("  Falling back to A* with wind-aware costs …")
-        wind_path = _astar(graph, s_ijk, g_ijk, use_wind=True)
-
-    if wind_path is not None:
-        wind_path = _smooth_path(wind_path)
-        wind_path[0] = origin_local
-        wind_path[-1] = dest_local
-        wind_energy = _compute_energy(wind_path, graph)
+    # Pick whichever candidate uses less energy
+    if (cuopt_energy is not None and astar_energy is not None
+            and cuopt_energy["energy_wh"] < astar_energy["energy_wh"]):
+        log.info("  Using cuOpt route (better energy)")
+        wind_path = cuopt_wind_path
+        wind_energy = cuopt_energy
         wind_geo = _path_to_geo(wind_path)
-        log.info("  Wind route: %.0fm, %.1fs, %.2f Wh",
-                 wind_energy["distance_m"], wind_energy["time_s"],
-                 wind_energy["energy_wh"])
+    elif astar_wind_path is not None:
+        log.info("  Using A* wind route (better energy)")
+        wind_path = ap
+        wind_energy = astar_energy
+        wind_geo = _path_to_geo(wind_path)
     else:
         log.warning("  Wind route computation failed")
         wind_energy = {"energy_wh": 0, "distance_m": 0, "time_s": 0}
         wind_geo = []
 
-    # -- Energy comparison -------------------------------------------
+    log.info("  Final wind route: %.0fm, %.1fs, %.2f Wh",
+             wind_energy["distance_m"], wind_energy["time_s"],
+             wind_energy["energy_wh"])
+
+    # -- Energy comparison + wind exposure ----------------------------
     e_dist = dist_energy["energy_wh"]
     e_wind = wind_energy["energy_wh"]
     if e_dist > 0:
         savings = round((e_dist - e_wind) / e_dist * 100, 1)
     else:
         savings = 0.0
+
+    # Wind exposure metrics
+    if dist_path is not None:
+        max_w_d, mean_w_d = _wind_exposure(dist_path, graph)
+    else:
+        max_w_d, mean_w_d = 0, 0
+    if wind_path is not None and wind_geo:
+        max_w_w, mean_w_w = _wind_exposure(wind_path, graph)
+    else:
+        max_w_w, mean_w_w = 0, 0
+
+    if mean_w_d > 0:
+        wind_reduction_pct = round((mean_w_d - mean_w_w) / mean_w_d * 100, 1)
+    else:
+        wind_reduction_pct = 0.0
+
+    log.info("  Wind exposure — dist route: peak %.1f / mean %.1f m/s, "
+             "wind route: peak %.1f / mean %.1f m/s  → %.1f%% reduction",
+             max_w_d, mean_w_d, max_w_w, mean_w_w, wind_reduction_pct)
 
     result = {
         "distance_route": {
@@ -668,6 +835,11 @@ def compute_routes(occupancy: np.ndarray, vel: np.ndarray,
             **wind_energy,
         },
         "energy_savings_pct": savings,
+        "max_wind_on_dist_route": round(max_w_d, 1),
+        "max_wind_on_wind_route": round(max_w_w, 1),
+        "mean_wind_on_dist_route": round(mean_w_d, 1),
+        "mean_wind_on_wind_route": round(mean_w_w, 1),
+        "wind_reduction_pct": wind_reduction_pct,
     }
 
     os.makedirs(config.ROUTES_DIR, exist_ok=True)

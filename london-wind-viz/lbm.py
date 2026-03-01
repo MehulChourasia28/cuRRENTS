@@ -169,7 +169,9 @@ def solve_wind(occupancy, wind_angle_deg, wind_speed_ms=None,
     proc = subprocess.run(
         [sys.executable, script,
          str(wind_angle_deg), str(grid_res), str(num_steps),
-         str(wind_speed_ms), occ_path, out_dir],
+         str(wind_speed_ms), occ_path, out_dir,
+         str(config.DOMAIN_HALF_X), str(config.DOMAIN_HALF_Y),
+         str(config.DOMAIN_HEIGHT)],
         capture_output=False,
         env=sub_env,
     )
@@ -192,7 +194,9 @@ def solve_wind(occupancy, wind_angle_deg, wind_speed_ms=None,
 
 
 def _solve_wind_inproc(occupancy, wind_angle_deg, grid_res=None,
-                       num_steps=None, wind_speed_ms=None):
+                       num_steps=None, wind_speed_ms=None,
+                       domain_half_x=None, domain_half_y=None,
+                       domain_height=None):
     """In-process LBM solve (called by the subprocess entry point below)."""
     import warp as wp
     from xlb.operator.stepper import IncompressibleNavierStokesStepper
@@ -200,10 +204,13 @@ def _solve_wind_inproc(occupancy, wind_angle_deg, grid_res=None,
     grid_res = grid_res or config.LBM_GRID_RES
     num_steps = num_steps or _N_STEPS
     wind_speed_ms = wind_speed_ms or config.WIND_SPEED
+    domain_half_x = domain_half_x or config.DOMAIN_HALF_X
+    domain_half_y = domain_half_y or config.DOMAIN_HALF_Y
+    domain_height = domain_height or config.DOMAIN_HEIGHT
 
-    nx = int(2 * config.DOMAIN_HALF_X / grid_res)
-    ny = int(2 * config.DOMAIN_HALF_Y / grid_res)
-    nz = int(config.DOMAIN_HEIGHT / grid_res)
+    nx = int(2 * domain_half_x / grid_res)
+    ny = int(2 * domain_half_y / grid_res)
+    nz = int(domain_height / grid_res)
     grid_shape = (nx, ny, nz)
 
     vs, grid, pp, cb = _init_xlb(grid_shape)
@@ -262,10 +269,9 @@ def _solve_wind_inproc(occupancy, wind_angle_deg, grid_res=None,
                     uy.ravel() * phys_scale,
                     uz.ravel() * phys_scale], axis=1).astype(np.float32)
 
-    # Build matching physical coordinate grid
-    xs = np.linspace(-config.DOMAIN_HALF_X, config.DOMAIN_HALF_X, inner_nx, dtype=np.float32)
-    ys = np.linspace(-config.DOMAIN_HALF_Y, config.DOMAIN_HALF_Y, inner_ny, dtype=np.float32)
-    zs = np.linspace(0, config.DOMAIN_HEIGHT, inner_nz, dtype=np.float32)
+    xs = np.linspace(-domain_half_x, domain_half_x, inner_nx, dtype=np.float32)
+    ys = np.linspace(-domain_half_y, domain_half_y, inner_ny, dtype=np.float32)
+    zs = np.linspace(0, domain_height, inner_nz, dtype=np.float32)
     xx, yy, zz = np.meshgrid(xs, ys, zs, indexing="ij")
     coords_m = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=1)
 
@@ -290,10 +296,14 @@ if __name__ == "__main__":
     wind_speed_ms = float(sys.argv[4])
     occ_path = sys.argv[5]
     out_dir = sys.argv[6]
+    domain_half_x = float(sys.argv[7]) if len(sys.argv) > 7 else None
+    domain_half_y = float(sys.argv[8]) if len(sys.argv) > 8 else None
+    domain_height = float(sys.argv[9]) if len(sys.argv) > 9 else None
 
     occ = np.load(occ_path)
     coords, vel, shape = _solve_wind_inproc(
-        occ, angle_deg, grid_res, num_steps, wind_speed_ms)
+        occ, angle_deg, grid_res, num_steps, wind_speed_ms,
+        domain_half_x, domain_half_y, domain_height)
 
     np.save(os.path.join(out_dir, "coords.npy"), coords)
     np.save(os.path.join(out_dir, "vel.npy"), vel)

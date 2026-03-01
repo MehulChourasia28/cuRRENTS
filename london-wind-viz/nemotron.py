@@ -31,7 +31,7 @@ GENERATION_MODEL = "nvidia/llama-3.1-nemotron-nano-8b-v1"
 REWARD_MODEL = "nvidia/llama-3.1-nemotron-70b-reward"
 NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
-BATCH_SIZE = 15
+BATCH_SIZE = 5
 MAX_ROUNDS = 6
 MAX_GEN_RETRIES = 4
 REWARD_CONCURRENCY = 3
