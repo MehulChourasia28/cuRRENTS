@@ -93,6 +93,7 @@ def receive_coords():
     print(f"  Domain set: center ({center_lat:.5f}, {center_lon:.5f}), "
           f"extent {half_x*2:.0f}×{half_y*2:.0f} m")
 
+    set_pipeline_status("starting", "Coordinates received")
     _coords_event.set()
 
     return jsonify({
