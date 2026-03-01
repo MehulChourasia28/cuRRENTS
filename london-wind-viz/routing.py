@@ -23,7 +23,7 @@ from typing import Optional
 import numpy as np
 import requests
 from scipy.interpolate import RegularGridInterpolator
-from scipy.ndimage import distance_transform_edt, zoom
+from scipy.ndimage import zoom
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
@@ -78,8 +78,6 @@ class _NavGraph:
         self._xs = np.linspace(-config.DOMAIN_HALF_X, config.DOMAIN_HALF_X, self.nx)
         self._ys = np.linspace(-config.DOMAIN_HALF_Y, config.DOMAIN_HALF_Y, self.ny)
         self._zs = np.linspace(0, config.DOMAIN_HEIGHT, self.nz)
-
-        self._bldg_dist = distance_transform_edt(~self.blocked).astype(np.float32)
 
         log.info("  NavGraph %dx%dx%d = %d nodes (%.0f%% blocked)",
                  self.nx, self.ny, self.nz, self.total,
@@ -164,17 +162,9 @@ class _NavGraph:
                 - tailwind_benefit,
                 0.1, None)
 
-            src_bd = self._bldg_dist[free_ijk[idx_v, 0],
-                                     free_ijk[idx_v, 1],
-                                     free_ijk[idx_v, 2]]
-            dst_bd = self._bldg_dist[nb_v[:, 0], nb_v[:, 1], nb_v[:, 2]]
-            avg_bd = 0.5 * (src_bd + dst_bd)
-            prox_pen = np.clip(1.5 / (avg_bd + 1.0), 0.0, 1.5)
-            dist_with_prox = dist * (1.0 + prox_pen)
-
             all_rows.append(src_flat)
             all_cols.append(dst_flat)
-            all_dist.append(dist_with_prox)
+            all_dist.append(dist)
             all_wind.append(wind_cost)
 
         rows = np.concatenate(all_rows)

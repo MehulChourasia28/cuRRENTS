@@ -28,64 +28,22 @@ def _ensure_dirs():
         os.makedirs(d, exist_ok=True)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Urban Wind Viz pipeline")
-    parser.add_argument("--skip-geometry", action="store_true",
-                        help="Reuse cached geometry (skip heightmap scan)")
-    parser.add_argument("--skip-nemotron", action="store_true",
-                        help="Skip Nemotron generation; use 2 fallback angles")
-    parser.add_argument("--lbm-steps", type=int, default=None)
-    parser.add_argument("--serve-only", action="store_true",
-                        help="Only start the web server")
-    args = parser.parse_args()
-
-    _ensure_dirs()
-
-    if args.serve_only:
-        import server
-        server.start()
-        return
-
-    # Start the server in background (needed for browser interaction)
-    import server
-    srv = threading.Thread(target=server.start, daemon=True)
-    srv.start()
+def _run_pipeline(args, server, geometry_mod):
+    """Execute the full pipeline once for the current config values."""
+    import math as _m
 
     # ── 1. Geometry (from cache or browser scan) ──────────────────
-    import geometry
-
-    if not args.skip_geometry:
-        log.info("=" * 60)
-        log.info("  STEP 1 · Waiting for coords from browser")
-        log.info("=" * 60)
-        log.info('  Open http://localhost:%d', config.SERVER_PORT)
-        log.info('  Enter origin/dest → Analyze Route')
-
-        server.wait_for_coords()
-        log.info("  Coords received: (%.5f, %.5f) ± %.0f×%.0f m",
-                 config.DOMAIN_CENTER_LAT, config.DOMAIN_CENTER_LON,
-                 config.DOMAIN_HALF_X, config.DOMAIN_HALF_Y)
-
-        if config.has_cached_geometry():
-            log.info("  Cache HIT — loading geometry from %s",
-                     config.domain_cache_dir())
-            server.set_pipeline_status("cache", "Loading cached geometry …")
-            _, occupancy, _ = geometry.load_cached_geometry()
-        else:
-            log.info("  Cache MISS — waiting for heightmap scan from browser")
-            server.set_pipeline_status("scanning", "Scanning tile geometry …")
-            server.wait_for_heightmap()
-            log.info("  Heightmap received and cached")
-            occupancy = np.load(os.path.join(config.DOMAIN_DIR, "occupancy.npy"))
+    if config.has_cached_geometry():
+        log.info("  Cache HIT — loading geometry from %s",
+                 config.domain_cache_dir())
+        server.set_pipeline_status("cache", "Loading cached geometry …")
+        _, occupancy, _ = geometry_mod.load_cached_geometry()
     else:
-        try:
-            data, occupancy, _ = geometry.load_geometry()
-            geh = data.get("domain", {}).get("ground_ellipsoid_height")
-            if geh is not None:
-                config.GROUND_ELLIPSOID_HEIGHT = geh
-        except Exception:
-            log.error("No cached geometry found. Run without --skip-geometry.")
-            return
+        log.info("  Cache MISS — waiting for heightmap scan from browser")
+        server.set_pipeline_status("scanning", "Scanning tile geometry …")
+        server.wait_for_heightmap()
+        log.info("  Heightmap received and cached")
+        occupancy = np.load(os.path.join(config.DOMAIN_DIR, "occupancy.npy"))
 
     # ── 2. Fetch real wind data ─────────────────────────────────
     log.info("=" * 60)
@@ -99,9 +57,9 @@ def main():
         config.DOMAIN_HALF_X, config.DOMAIN_HALF_Y))
 
     base_speed = profile.speed_at_height.get(50.0, config.WIND_SPEED)
-    base_dir = profile.direction_deg
 
     # ── 3. Nemotron variations (or fallback) ────────────────────
+    scenarios = None
     if not args.skip_nemotron and config.NIM_API_KEY:
         log.info("=" * 60)
         log.info("  STEP 3 · Nemotron scenario generation")
@@ -115,7 +73,6 @@ def main():
             scenarios = None
     else:
         log.info("  Skipping Nemotron (--skip-nemotron or no NIM_API_KEY)")
-        scenarios = None
 
     if scenarios is None:
         from dataclasses import dataclass
@@ -125,8 +82,6 @@ def main():
             u_ref: float
             direction_deg: float
 
-        # Use cardinal directions (0° and 90°) as fallback — these are
-        # single-axis inlets that compile fastest in XLB/Warp.
         scenarios = [
             _FB(u_ref=base_speed, direction_deg=0),
             _FB(u_ref=base_speed, direction_deg=90),
@@ -161,7 +116,6 @@ def main():
     if not all_vel:
         log.error("All LBM solves failed")
         server.set_pipeline_status("error", "All LBM solves failed")
-        srv.join()
         return
 
     avg_vel = np.mean(all_vel, axis=0).astype(np.float32)
@@ -182,7 +136,6 @@ def main():
     log.info("=" * 60)
     server.set_pipeline_status("routing", "Computing drone routes …")
 
-    import math as _m
     import routing
 
     lat_per_m = 1.0 / 111_320.0
@@ -209,10 +162,49 @@ def main():
     log.info("  Pipeline complete — server at http://localhost:%d", config.SERVER_PORT)
     log.info("=" * 60)
 
-    try:
-        srv.join()
-    except KeyboardInterrupt:
-        pass
+
+def main():
+    parser = argparse.ArgumentParser(description="Urban Wind Viz pipeline")
+    parser.add_argument("--skip-geometry", action="store_true",
+                        help="Reuse cached geometry (skip heightmap scan)")
+    parser.add_argument("--skip-nemotron", action="store_true",
+                        help="Skip Nemotron generation; use 2 fallback angles")
+    parser.add_argument("--lbm-steps", type=int, default=None)
+    parser.add_argument("--serve-only", action="store_true",
+                        help="Only start the web server")
+    args = parser.parse_args()
+
+    _ensure_dirs()
+
+    if args.serve_only:
+        import server
+        server.start()
+        return
+
+    import server
+    import geometry
+
+    srv = threading.Thread(target=server.start, daemon=True)
+    srv.start()
+
+    while True:
+        log.info("=" * 60)
+        log.info("  Waiting for route request from browser …")
+        log.info("=" * 60)
+        log.info('  http://localhost:%d', config.SERVER_PORT)
+
+        server.wait_for_coords()
+        log.info("  Coords received: (%.5f, %.5f) ± %.0f×%.0f m",
+                 config.DOMAIN_CENTER_LAT, config.DOMAIN_CENTER_LON,
+                 config.DOMAIN_HALF_X, config.DOMAIN_HALF_Y)
+
+        try:
+            _run_pipeline(args, server, geometry)
+        except Exception as exc:
+            log.error("  Pipeline failed: %s", exc, exc_info=True)
+            server.set_pipeline_status("error", str(exc))
+
+        server.reset_pipeline_events()
 
 
 if __name__ == "__main__":

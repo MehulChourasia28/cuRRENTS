@@ -69,6 +69,8 @@ async function boot() {
   flyTo(cfg.center_lat, cfg.center_lon);
   wireControls();
   document.getElementById("ck-particles").checked = true;
+  loadCombinedStreamlines();
+  loadRoutes();
   viewer.scene.preRender.addEventListener(tick);
 }
 
@@ -178,13 +180,9 @@ async function analyzeRoute() {
     status("Invalid coordinates"); return;
   }
 
+  clearAllVisualizations();
   status("Setting domain …");
   document.getElementById("btn-analyze").disabled = true;
-  clearStreamlinePrimitives();
-  clearRoutes();
-  currentData = null;
-  routeData = null;
-  document.getElementById("route-results").classList.add("hidden");
   showPipelineProgress();
 
   try {
@@ -224,7 +222,6 @@ async function analyzeRoute() {
 }
 
 function showInputMarkers(origin, dest, originH, destH) {
-  clearRoutes();
   const geh = (cfg && cfg.ground_ellipsoid_height) || 58;
   addMarker([origin.lon, origin.lat, geh + originH], "A", Cesium.Color.fromCssColorString("#00d2ff"));
   addMarker([dest.lon, dest.lat, geh + destH], "B", Cesium.Color.fromCssColorString("#76B900"));
@@ -449,6 +446,14 @@ function clearRoutes() {
   routeEntities.length = 0;
 }
 
+function clearAllVisualizations() {
+  clearStreamlinePrimitives();
+  clearRoutes();
+  currentData = null;
+  routeData = null;
+  document.getElementById("route-results").classList.add("hidden");
+}
+
 function updateRouteUI() {
   if (!routeData) return;
   const panel = document.getElementById("route-results");
@@ -466,24 +471,7 @@ function updateRouteUI() {
   document.getElementById("wind-energy").textContent = (wr.energy_wh || 0).toFixed(1);
 
   const savings = routeData.energy_savings_pct || 0;
-  const badge = document.querySelector(".savings-badge");
-  const label = document.getElementById("savings-label");
-
-  if (savings >= 0) {
-    badge.classList.remove("savings-negative");
-    label.textContent = "energy saved";
-    animateSavings(savings);
-  } else {
-    badge.classList.add("savings-negative");
-    const windReduction = routeData.wind_reduction_pct || 0;
-    if (windReduction > 0) {
-      label.textContent = "wind exposure reduced";
-      animateSavings(windReduction);
-    } else {
-      label.textContent = "safer route (less turbulence)";
-      animateSavings(0);
-    }
-  }
+  animateSavings(Math.max(0, savings));
 }
 
 function animateSavings(target) {

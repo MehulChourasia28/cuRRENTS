@@ -253,18 +253,31 @@ def _seeds(wind_deg, occ):
     res = config.VOXEL_RESOLUTION
     seeds = []
 
-    # 1) Inlet face — mostly below 50 m to keep streamlines between buildings
+    # 1) Inlet faces — split between street-level and mid-altitude bands
     n = config.SEED_INLET_COUNT
-    max_inlet_z = 50.0
+    max_z_low = min(50.0, config.DOMAIN_HEIGHT * 0.4)
+    max_z_high = config.DOMAIN_HEIGHT * 0.75
     if abs(ca) > 0.1:
         x0 = -np.sign(ca) * config.DOMAIN_HALF_X * 0.95
-        for y, z in zip(rng.uniform(-0.9, 0.9, n // 2) * config.DOMAIN_HALF_Y,
-                        rng.uniform(2, max_inlet_z, n // 2)):
+        n_face = n // 2
+        n_low = n_face * 2 // 3
+        n_high = n_face - n_low
+        for y, z in zip(rng.uniform(-0.9, 0.9, n_low) * config.DOMAIN_HALF_Y,
+                        rng.uniform(2, max_z_low, n_low)):
+            seeds.append(np.array([x0, y, z]))
+        for y, z in zip(rng.uniform(-0.9, 0.9, n_high) * config.DOMAIN_HALF_Y,
+                        rng.uniform(max_z_low, max_z_high, n_high)):
             seeds.append(np.array([x0, y, z]))
     if abs(sa) > 0.1:
         y0 = -np.sign(sa) * config.DOMAIN_HALF_Y * 0.95
-        for x, z in zip(rng.uniform(-0.9, 0.9, n // 2) * config.DOMAIN_HALF_X,
-                        rng.uniform(2, max_inlet_z, n // 2)):
+        n_face = n // 2
+        n_low = n_face * 2 // 3
+        n_high = n_face - n_low
+        for x, z in zip(rng.uniform(-0.9, 0.9, n_low) * config.DOMAIN_HALF_X,
+                        rng.uniform(2, max_z_low, n_low)):
+            seeds.append(np.array([x, y0, z]))
+        for x, z in zip(rng.uniform(-0.9, 0.9, n_high) * config.DOMAIN_HALF_X,
+                        rng.uniform(max_z_low, max_z_high, n_high)):
             seeds.append(np.array([x, y0, z]))
 
     # 2) Near building surfaces (offset outward by a few metres)
@@ -315,17 +328,25 @@ def compute(coords, velocities, shape, occ, wind_deg):
     print(f"    {len(seeds)} seed points")
 
     results = []
+    n_loops = 0
     for s in seeds:
         if _inside(s, occ):
             continue
         pos, spd = _trace(interps, sdf_interp, s, occ)
         if len(pos) < 3:
             continue
-        length = np.sum(np.linalg.norm(np.diff(pos, axis=0), axis=1))
+        diffs = np.diff(pos, axis=0)
+        length = float(np.sum(np.linalg.norm(diffs, axis=1)))
         if length < config.STREAMLINE_MIN_LENGTH:
+            continue
+        start_end = float(np.linalg.norm(pos[-1] - pos[0]))
+        if length > 0 and start_end / length < 0.15:
+            n_loops += 1
             continue
         results.append({"positions": pos, "speeds": spd})
 
+    if n_loops:
+        print(f"    Filtered {n_loops} recirculating loops")
     print(f"    {len(results)} valid streamlines")
     return results
 
@@ -401,8 +422,14 @@ def run_from_field(occupancy, coords, vel, shape):
     """Compute streamlines from a pre-computed (averaged) velocity field
     and save as ``streamlines_combined.json``."""
     print("\n── Combined averaged wind field ──")
-    sls = compute(coords, vel, shape, occupancy, 0)
-    data = to_cesium_json(sls, 0)
+
+    mean_vx = float(np.mean(vel[:, 0]))
+    mean_vy = float(np.mean(vel[:, 1]))
+    dominant_deg = math.degrees(math.atan2(mean_vy, mean_vx)) % 360
+    print(f"    Dominant wind direction: {dominant_deg:.0f}° (mean vx={mean_vx:.2f}, vy={mean_vy:.2f})")
+
+    sls = compute(coords, vel, shape, occupancy, dominant_deg)
+    data = to_cesium_json(sls, dominant_deg)
 
     os.makedirs(config.STREAMLINE_DIR, exist_ok=True)
     path = os.path.join(config.STREAMLINE_DIR, "streamlines_combined.json")

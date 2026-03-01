@@ -21,6 +21,12 @@ _coords_event = threading.Event()
 _pipeline_status = {"stage": "idle", "detail": ""}
 
 
+def reset_pipeline_events():
+    """Clear both events so the pipeline loop can wait for the next request."""
+    _coords_event.clear()
+    _heightmap_event.clear()
+
+
 # ── Static / frontend ───────────────────────────────────────────────
 
 @app.route("/")
@@ -93,7 +99,6 @@ def receive_coords():
     print(f"  Domain set: center ({center_lat:.5f}, {center_lon:.5f}), "
           f"extent {half_x*2:.0f}×{half_y*2:.0f} m")
 
-    set_pipeline_status("starting", "Coordinates received")
     _coords_event.set()
 
     return jsonify({
