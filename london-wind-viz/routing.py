@@ -59,11 +59,8 @@ class _NavGraph:
         self.res = res
         self.total = self.nx * self.ny * self.nz
 
-        occ_ds = zoom(occupancy,
-                      (self.nx / occupancy.shape[0],
-                       self.ny / occupancy.shape[1],
-                       self.nz / occupancy.shape[2]), order=0)
-        self.blocked = occ_ds > 0.5
+        self.blocked = self._maxpool_downsample(
+            occupancy > 0.5, self.nx, self.ny, self.nz)
 
         vel_3c = vel_field.reshape(shape[0], shape[1], shape[2], 3)
         xs_v = np.linspace(-config.DOMAIN_HALF_X, config.DOMAIN_HALF_X, shape[0])
@@ -84,6 +81,28 @@ class _NavGraph:
                  self.blocked.sum() / self.blocked.size * 100)
 
         self._sparse_dist, self._sparse_wind = self._build_sparse()
+
+    @staticmethod
+    def _maxpool_downsample(occ_bool, tnx, tny, tnz):
+        """Downsample a boolean occupancy grid so that if ANY fine voxel
+        within a coarse cell is occupied, the coarse cell is blocked."""
+        snx, sny, snz = occ_bool.shape
+        out = np.zeros((tnx, tny, tnz), dtype=bool)
+        bx = snx / tnx
+        by = sny / tny
+        bz = snz / tnz
+        for ix in range(tnx):
+            sx0 = int(ix * bx)
+            sx1 = min(snx, int((ix + 1) * bx))
+            for iy in range(tny):
+                sy0 = int(iy * by)
+                sy1 = min(sny, int((iy + 1) * by))
+                for iz in range(tnz):
+                    sz0 = int(iz * bz)
+                    sz1 = min(snz, int((iz + 1) * bz))
+                    if occ_bool[sx0:sx1, sy0:sy1, sz0:sz1].any():
+                        out[ix, iy, iz] = True
+        return out
 
     def _build_sparse(self):
         """Build sparse adjacency matrices (distance and wind-aware) for the
@@ -140,7 +159,6 @@ class _NavGraph:
             dist = np.linalg.norm(diff, axis=1)
 
             mid = 0.5 * (p0 + p1)
-            mid_pts = mid.reshape(-1, 1, 3)
             wind = np.zeros_like(mid)
             for c in range(3):
                 wind[:, c] = self._vel_interps[c](mid).ravel()
@@ -212,6 +230,7 @@ class _NavGraph:
         return float(np.linalg.norm(p1 - p0))
 
     def _edge_wind_cost(self, p0, p1):
+        """Wind-aware edge cost matching the sparse-matrix computation."""
         dist = self._edge_distance(p0, p1)
         mid = 0.5 * (p0 + p1)
         w = self.wind_at(mid)
@@ -225,9 +244,11 @@ class _NavGraph:
         max_ws = max(config.WIND_SPEED, 1.0)
         hw_penalty = max(0.0, headwind) / max_ws
         sp_penalty = w_speed / max_ws
-        return dist * (1.0
-                       + config.WIND_COST_ALPHA * hw_penalty
-                       + config.WIND_COST_BETA * sp_penalty)
+        tailwind_benefit = max(0.0, -headwind) / max_ws * 0.3
+        return dist * max(0.1,
+                          1.0 + config.WIND_COST_ALPHA * hw_penalty
+                          + config.WIND_COST_BETA * sp_penalty
+                          - tailwind_benefit)
 
 
 # =====================================================================
@@ -245,6 +266,9 @@ def _astar(graph: _NavGraph, start_ijk, goal_ijk, use_wind: bool):
 
     goal_pos = graph.pos(*goal_ijk)
     visited = set()
+    # Wind-cost edges can be < Euclidean (tailwind discount), so scale
+    # the heuristic by the minimum possible cost factor to stay admissible.
+    h_scale = 0.1 if use_wind else 1.0
 
     while open_set:
         f_cur, cur = heapq.heappop(open_set)
@@ -270,7 +294,7 @@ def _astar(graph: _NavGraph, start_ijk, goal_ijk, use_wind: bool):
                 came_from[ni] = cur
                 nijk = graph.ijk(ni)
                 nb_pos = graph.pos(*nijk)
-                h = float(np.linalg.norm(nb_pos - goal_pos))
+                h = h_scale * float(np.linalg.norm(nb_pos - goal_pos))
                 heapq.heappush(open_set, (tentative + h, ni))
 
     if gi not in came_from and si != gi:
@@ -342,49 +366,57 @@ def _validate_path(path: np.ndarray, graph: _NavGraph) -> np.ndarray:
 def _validate_path_fine(path: np.ndarray, occupancy: np.ndarray) -> np.ndarray:
     """Second-pass validation against the original fine-resolution occupancy.
 
-    Checks each point and its immediate XY neighbours (±1 voxel) to account
-    for coordinate rounding in the local-to-geo conversion.  Lifts by an
-    extra voxel beyond the first clear one for safety margin.
+    For each waypoint AND interpolated midpoints between consecutive
+    waypoints, checks the center voxel column.  If blocked, lifts to the
+    first clear altitude (searching up to the domain ceiling).
     """
     vox = config.VOXEL_RESOLUTION
     hx = config.DOMAIN_HALF_X
     hy = config.DOMAIN_HALF_Y
     nxf, nyf, nzf = occupancy.shape
 
+    def _find_clear_z(cx, cy, cz_start):
+        """Search upward from cz_start for the first clear voxel."""
+        cx = int(np.clip(cx, 0, nxf - 1))
+        cy = int(np.clip(cy, 0, nyf - 1))
+        for tz in range(max(0, cz_start), nzf):
+            if not occupancy[cx, cy, tz]:
+                return (tz + 1) * vox
+        return config.DOMAIN_HEIGHT - vox
+
+    def _is_blocked(cx, cy, cz):
+        cx = int(np.clip(cx, 0, nxf - 1))
+        cy = int(np.clip(cy, 0, nyf - 1))
+        cz = int(np.clip(cz, 0, nzf - 1))
+        return bool(occupancy[cx, cy, cz])
+
+    def _lift_point(pt):
+        cx = int((pt[0] + hx) / vox)
+        cy = int((pt[1] + hy) / vox)
+        cz = int(pt[2] / vox)
+        if _is_blocked(cx, cy, cz):
+            pt[2] = _find_clear_z(cx, cy, cz)
+            return True
+        return False
+
     for i in range(len(path)):
-        cx = int((path[i][0] + hx) / vox)
-        cy = int((path[i][1] + hy) / vox)
-        cz = int(path[i][2] / vox)
+        _lift_point(path[i])
 
-        blocked = False
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                ix = np.clip(cx + dx, 0, nxf - 1)
-                iy = np.clip(cy + dy, 0, nyf - 1)
-                iz = np.clip(cz, 0, nzf - 1)
-                if occupancy[ix, iy, iz]:
-                    blocked = True
-                    break
-            if blocked:
-                break
+    new_pts = [path[0]]
+    for i in range(len(path) - 1):
+        seg = path[i + 1] - path[i]
+        seg_len = float(np.linalg.norm(seg))
+        n_sub = max(1, int(seg_len / vox))
+        for s in range(1, n_sub):
+            mid = path[i] + seg * (s / n_sub)
+            if _lift_point(mid):
+                new_pts.append(mid.copy())
+        new_pts.append(path[i + 1])
 
-        if blocked:
-            for dz in range(1, 30):
-                tz = min(cz + dz, nzf - 1)
-                clear = True
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        ix = np.clip(cx + dx, 0, nxf - 1)
-                        iy = np.clip(cy + dy, 0, nyf - 1)
-                        if occupancy[ix, iy, tz]:
-                            clear = False
-                            break
-                    if not clear:
-                        break
-                if clear:
-                    path[i][2] = (tz + 1) * vox
-                    break
-    return path
+    result = np.array(new_pts)
+    for i in range(len(result)):
+        _lift_point(result[i])
+    return result
 
 
 # =====================================================================

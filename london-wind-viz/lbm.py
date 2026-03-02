@@ -217,6 +217,7 @@ def _solve_wind_inproc(occupancy, wind_angle_deg, grid_res=None,
 
     visc = _U_LATTICE * (nx - 1) / _RE
     omega = 1.0 / (3.0 * visc + 0.5)
+    omega = min(omega, 1.5)
 
     bcs = _build_boundary_conditions(grid, vs, occupancy, wind_angle_deg, grid_shape)
 

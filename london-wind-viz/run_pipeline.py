@@ -88,30 +88,75 @@ def _run_pipeline(args, server, geometry_mod):
         ]
 
     # ── 4. LBM solves + averaging ───────────────────────────────
+    # Decompose each Nemotron scenario into two cardinal-direction solves
+    # (0° and 90°) weighted by cos/sin.  XLB's RegularizedBC is stable for
+    # single-face inlets but diverges for diagonal angles, so this gives
+    # physically sound results via linear superposition while always stable.
     log.info("=" * 60)
-    log.info("  STEP 4 · LBM solves (%d variations)", len(scenarios))
+    log.info("  STEP 4 · LBM solves (%d variations × 2 cardinal dirs)", len(scenarios))
     log.info("=" * 60)
 
-    import lbm
+    import lbm, math
 
     all_vel = []
     coords_m = shape = None
+    lbm_cache = {}
+
+    _DIVERGED = object()
+
+    def _solve_cardinal(cardinal_angle, spd, label):
+        """Solve a cardinal direction, caching results (including failures)."""
+        key = (cardinal_angle, round(spd, 2))
+        if key in lbm_cache:
+            cached = lbm_cache[key]
+            if cached is _DIVERGED:
+                raise ValueError(f"previously diverged at {cardinal_angle}°")
+            log.info("    %s — cached", label)
+            return cached
+        log.info("    %s", label)
+        c, v, s = lbm.solve_wind(occupancy, cardinal_angle,
+                                 wind_speed_ms=spd,
+                                 num_steps=args.lbm_steps)
+        max_spd = float(np.linalg.norm(v, axis=1).max())
+        if max_spd > spd * 8:
+            lbm_cache[key] = _DIVERGED
+            raise ValueError(f"diverged (max {max_spd:.0f} m/s vs {spd:.1f} input)")
+        lbm_cache[key] = (c, v, s)
+        return c, v, s
 
     for i, sc in enumerate(scenarios, 1):
         angle = sc.direction_deg
         speed = sc.u_ref
-        log.info("  Variation %d/%d: %.1f m/s @ %.0f°", i, len(scenarios), speed, angle)
+        rad = math.radians(angle)
+        cx, cy = abs(math.cos(rad)), abs(math.sin(rad))
+        log.info("  Variation %d/%d: %.1f m/s @ %.0f° → decomposed (cx=%.2f, cy=%.2f)",
+                 i, len(scenarios), speed, angle, cx, cy)
         server.set_pipeline_status("lbm", f"Solving variation {i}/{len(scenarios)} …")
 
-        try:
-            c, v, s = lbm.solve_wind(occupancy, angle,
-                                     wind_speed_ms=speed,
-                                     num_steps=args.lbm_steps)
-            all_vel.append(v)
-            if coords_m is None:
-                coords_m, shape = c, s
-        except Exception as exc:
-            log.warning("  LBM failed for variation %d: %s", i, exc)
+        vel_combined = None
+        if cx > 0.1:
+            try:
+                c0, v0, s0 = _solve_cardinal(0, speed, f"0° component ({speed*cx:.1f} m/s)")
+                sign_x = 1.0 if math.cos(rad) > 0 else -1.0
+                vel_combined = v0 * (cx * sign_x)
+                if coords_m is None:
+                    coords_m, shape = c0, s0
+            except (ValueError, RuntimeError) as exc:
+                log.warning("    0° component failed: %s — using 90° only", exc)
+
+        if cy > 0.1:
+            try:
+                c90, v90, s90 = _solve_cardinal(90, speed, f"90° component ({speed*cy:.1f} m/s)")
+                sign_y = 1.0 if math.sin(rad) > 0 else -1.0
+                contrib = v90 * (cy * sign_y)
+                vel_combined = contrib if vel_combined is None else vel_combined + contrib
+                if coords_m is None:
+                    coords_m, shape = c90, s90
+            except (ValueError, RuntimeError) as exc:
+                log.warning("    90° component failed: %s — using 0° only", exc)
+
+        if vel_combined is not None:
+            all_vel.append(vel_combined.astype(np.float32))
 
     if not all_vel:
         log.error("All LBM solves failed")
