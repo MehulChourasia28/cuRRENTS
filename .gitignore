@@ -1,10 +1,7 @@
-*
-!london-wind-viz/
-!london-wind-viz/**
-
-# Exclude from london-wind-viz
-london-wind-viz/__pycache__/
-london-wind-viz/**/__pycache__/
-london-wind-viz/.env
-london-wind-viz/data/
-london-wind-viz/*.pyc
+.venv/
+data/
+cache/
+__pycache__/
+*.pyc
+*.pyo
+.env

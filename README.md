@@ -8,8 +8,9 @@
 2. **Scan geometry** -- sample Google 3D Tile surface heights to build a voxelised building occupancy grid
 3. **Fetch wind** -- query OpenWeather at a 5x5 grid across the domain, extrapolate to multiple heights via log-law
 4. **Nemotron variations** -- use NVIDIA NIM to generate 15 plausible wind scenario variations, score each with the reward model, keep those above the correctness threshold
-5. **LBM solve** -- run the GPU Lattice-Boltzmann solver for each validated variation (~0.5 s per solve on L40S)
+5. **LBM solve** -- run the GPU Lattice-Boltzmann solver for each validated variation
 6. **Average + visualise** -- average all velocity fields, compute streamlines, render on the 3D tiles
+7. **Compare** -- compare against shortest path (without wind optimisation)
 
 ## Quick start
 
