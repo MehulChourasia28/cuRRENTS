@@ -12,8 +12,10 @@ let pointCollection  = null;
 // Layer-toggle state
 let navGridCollection = null;
 let seedCollection    = null;
+let occVoxCollection  = null;
 let navGridLoaded     = false;
 let seedsLoaded       = false;
+let occVoxLoaded      = false;
 
 // ── Presets ───────────────────────────────────────────────────────────
 
@@ -27,6 +29,11 @@ const PRESETS = [
     origin: "51.5180, -0.0835", dest: "51.5145, -0.0810", oh: 100, dh: 110 },
   { name: "Tower 42 → The Scalpel",
     origin: "51.5160, -0.0820", dest: "51.5130, -0.0815", oh: 95,  dh: 100 },
+  // ── Modelling data routes ──────────────────────────────────────────────
+  { name: "Guy's → St Thomas's",
+    origin: "51.50254, -0.08788", dest: "51.49914, -0.11759", oh: 30, dh: 30 },
+  { name: "The Nelson → St George's",
+    origin: "51.410545, -0.209022", dest: "51.426072, -0.177525", oh: 30, dh: 30 },
 ];
 
 // Pipeline stage → stepper index
@@ -123,6 +130,10 @@ function wireControls() {
   document.getElementById("ck-seeds").onchange = async e => {
     if (e.target.checked && !seedsLoaded) await loadSeedPoints();
     if (seedCollection) seedCollection.show = e.target.checked;
+  };
+  document.getElementById("ck-occvox").onchange = async e => {
+    if (e.target.checked && !occVoxLoaded) await loadOccVoxels();
+    if (occVoxCollection) occVoxCollection.show = e.target.checked;
   };
 }
 
@@ -335,8 +346,10 @@ async function pollPipeline() {
         // regardless of whether they were previously loaded or the toggle state.
         navGridLoaded = false;
         seedsLoaded   = false;
+        occVoxLoaded  = false;
         if (document.getElementById("ck-navgrid").checked) await loadNavGrid();
         if (document.getElementById("ck-seeds").checked)   await loadSeedPoints();
+        if (document.getElementById("ck-occvox").checked)  await loadOccVoxels();
         return;
       }
 
@@ -563,6 +576,11 @@ function clearAll() {
     seedCollection = null;
     seedsLoaded    = false;
   }
+  if (occVoxCollection) {
+    viewer.scene.primitives.remove(occVoxCollection);
+    occVoxCollection = null;
+    occVoxLoaded     = false;
+  }
   currentData = null;
   routeData   = null;
   document.getElementById("route-results").classList.add("hidden");
@@ -652,6 +670,53 @@ async function loadSeedPoints() {
     }
     seedsLoaded = true;
   } catch (e) { console.warn("loadSeedPoints:", e); }
+}
+
+async function loadOccVoxels() {
+  try {
+    const r = await fetch(`/api/occupancy-voxels?t=${Date.now()}`);
+    if (!r.ok) return;
+    const data = await r.json();
+    if (occVoxCollection) {
+      viewer.scene.primitives.remove(occVoxCollection);
+      occVoxCollection = null;
+    }
+
+    const geh     = data.geh;
+    const halfRes = data.voxel_res_m / 2;
+    const latHalf = halfRes / 111320;          // degrees latitude per half-voxel
+    const color   = new Cesium.Color(1.0, 0.45, 0.1, 0.45);
+    const colAttr = Cesium.ColorGeometryInstanceAttribute.fromColor(color);
+
+    const instances = [];
+    for (const [lon, lat, topH] of data.columns) {
+      const lonHalf = halfRes / (111320 * Math.cos(Cesium.Math.toRadians(lat)));
+      instances.push(new Cesium.GeometryInstance({
+        geometry: new Cesium.RectangleGeometry({
+          rectangle:      Cesium.Rectangle.fromDegrees(
+                            lon - lonHalf, lat - latHalf,
+                            lon + lonHalf, lat + latHalf),
+          height:         geh,
+          extrudedHeight: geh + topH,
+        }),
+        attributes: { color: colAttr },
+      }));
+    }
+
+    if (!instances.length) { occVoxLoaded = true; return; }
+
+    occVoxCollection = new Cesium.Primitive({
+      geometryInstances: instances,
+      appearance: new Cesium.PerInstanceColorAppearance({
+        translucent: true,
+        closed:      true,
+      }),
+      asynchronous: true,
+    });
+    viewer.scene.primitives.add(occVoxCollection);
+    occVoxCollection.show = document.getElementById("ck-occvox").checked;
+    occVoxLoaded = true;
+  } catch (e) { console.warn("loadOccVoxels:", e); }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────

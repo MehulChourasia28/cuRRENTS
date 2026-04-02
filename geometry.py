@@ -53,7 +53,8 @@ def voxelize_from_heightmap(height_grid, sample_res, domain):
         for iy in range(ny):
             h = above[ix, iy]
             if h > config.HEIGHTMAP_MIN_BUILDING:
-                iz_max = min(nz, int(h / res))
+                # Use ceil so the partial top voxel is always included
+                iz_max = min(nz, int(np.ceil(h / res)))
                 occupancy[ix, iy, :iz_max] = 1.0
 
     pct = occupancy.mean() * 100

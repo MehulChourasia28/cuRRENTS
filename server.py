@@ -174,6 +174,43 @@ def get_nav_grid():
         return jsonify(json.load(f))
 
 
+@app.route("/api/occupancy-voxels")
+def get_occupancy_voxels():
+    cache     = config.domain_cache_dir()
+    occ_path  = os.path.join(cache, "occupancy.npy")
+    meta_path = os.path.join(cache, "meta.json")
+    if not os.path.exists(occ_path) or not os.path.exists(meta_path):
+        return jsonify({"error": "Not computed yet"}), 404
+    occ  = np.load(occ_path)
+    with open(meta_path) as f:
+        meta = json.load(f)
+    dom    = meta["domain"]
+    geh    = meta.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
+    res    = config.VOXEL_RESOLUTION
+    half_x = dom["half_x"]
+    half_y = dom["half_y"]
+    height = dom["height"]
+    nx, ny, nz = occ.shape
+    xs = np.linspace(-half_x, half_x, nx)
+    ys = np.linspace(-half_y, half_y, ny)
+    zs = np.linspace(0, height, nz)
+
+    occupied  = occ > 0.5                         # (nx, ny, nz) bool
+    has_bldg  = occupied.any(axis=2)              # (nx, ny)
+    # Vectorised: highest occupied z-index per column
+    max_iz = (nz - 1) - np.argmax(occupied[:, :, ::-1], axis=2)
+    max_iz = max_iz * has_bldg                    # zero where no building
+
+    # One column entry per building cell: [lon, lat, top_height_above_ground]
+    cols = []
+    for ix, iy in np.argwhere(has_bldg):
+        lon, lat = config.local_to_lonlat(xs[ix], ys[iy], dom)
+        top_h = float(zs[max_iz[ix, iy]]) + res  # top face of highest voxel
+        cols.append([round(lon, 7), round(lat, 7), round(top_h, 2)])
+
+    return jsonify({"columns": cols, "voxel_res_m": res, "geh": geh, "count": len(cols)})
+
+
 @app.route("/api/seed-points")
 def get_seed_points():
     path = os.path.join(config.STREAMLINE_DIR, "seed_points.json")

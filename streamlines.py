@@ -121,7 +121,7 @@ def _trace(interps, sdf_interp, start, occupancy, domain):
             break
 
         sdf_val = _sdf_at(sdf_interp, pos)
-        if sdf_val < config.VOXEL_RESOLUTION:
+        if sdf_val < 2 * config.VOXEL_RESOLUTION:
             break
 
         # Limit step to 25% of SDF distance so we never jump through thin walls
@@ -134,14 +134,15 @@ def _trace(interps, sdf_interp, start, occupancy, domain):
             break
         if _inside_building(npos, occupancy, domain) or _sdf_at(sdf_interp, npos) < 0.0:
             npos_half = _rk4_step(interps, pos, dt * 0.25, occupancy, domain)
-            if _inside_building(npos_half, occupancy, domain):
+            if (_inside_building(npos_half, occupancy, domain)
+                    or _sdf_at(sdf_interp, npos_half) < 0.0):
                 stall += 1
                 if stall > 3:
                     break
                 continue
             npos = npos_half
 
-        if _sdf_at(sdf_interp, npos) < config.VOXEL_RESOLUTION:
+        if _sdf_at(sdf_interp, npos) < 2 * config.VOXEL_RESOLUTION:
             break
 
         stall = 0

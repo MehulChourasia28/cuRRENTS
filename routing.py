@@ -9,7 +9,7 @@ import time
 import numpy as np
 import requests
 from scipy.interpolate import RegularGridInterpolator
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, distance_transform_edt
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
@@ -413,6 +413,86 @@ def _to_geo(path, domain):
     return out
 
 
+def _smooth_path(path, graph, domain):
+    """
+    Remove A* grid-quantization jaggedness:
+    1. Greedy string-pulling to eliminate redundant waypoints while staying
+       clear of buildings.
+    2. Catmull-Rom spline interpolation on the remaining keypoints for smooth
+       curves, with per-point safety fallback to linear if the spline wanders
+       too close to a building.
+    """
+    if len(path) <= 3:
+        return path
+
+    # SDF from the already-dilated nav blocked mask (metres from blocked cells)
+    sdf_arr = distance_transform_edt(~graph.blocked).astype(np.float32) * graph.res
+    sdf_interp = RegularGridInterpolator(
+        (graph._xs, graph._ys, graph._zs), sdf_arr,
+        bounds_error=False, fill_value=0.0)
+
+    # Half a grid cell — the blocked mask already embeds the 6 m building
+    # dilation, so this keeps smoothed points well clear of actual surfaces.
+    min_clearance = graph.res * 0.5
+
+    def _seg_clear(a, b):
+        length = float(np.linalg.norm(b - a))
+        n = max(4, int(length / (graph.res * 0.5)) + 1)
+        for t in np.linspace(0.0, 1.0, n):
+            pt = a + t * (b - a)
+            if sdf_interp(pt.reshape(1, -1)).item() < min_clearance:
+                return False
+        return True
+
+    # ── Step 1: greedy string-pulling ───────────────────────────────────────
+    keypoints = [path[0]]
+    i = 0
+    while i < len(path) - 1:
+        j = len(path) - 1
+        while j > i + 1 and not _seg_clear(path[i], path[j]):
+            j -= 1
+        keypoints.append(path[j])
+        i = j
+    kp = np.array(keypoints)
+
+    if len(kp) < 2:
+        return path
+
+    # ── Step 2: Catmull-Rom spline on the reduced keypoints ─────────────────
+    # Phantom endpoints so the spline reaches the first and last keypoints
+    phantom_s = kp[0] + (kp[0] - kp[1])
+    phantom_e = kp[-1] + (kp[-1] - kp[-2])
+    ctrl = np.vstack([phantom_s, kp, phantom_e])
+
+    spacing  = graph.res * 0.5   # target output point spacing (m)
+    smoothed = [kp[0]]
+
+    for i in range(1, len(ctrl) - 2):
+        p0, p1, p2, p3 = ctrl[i - 1], ctrl[i], ctrl[i + 1], ctrl[i + 2]
+        seg_len = float(np.linalg.norm(p2 - p1))
+        n_seg   = max(2, int(seg_len / spacing))
+
+        for k in range(1, n_seg + 1):
+            t  = k / n_seg
+            t2 = t * t
+            t3 = t2 * t
+            pt = 0.5 * (
+                2 * p1
+                + (-p0 + p2)                  * t
+                + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
+                + (-p0 + 3 * p1 - 3 * p2 + p3)    * t3
+            )
+            # If the spline curves too close to a building, fall back to linear
+            if sdf_interp(pt.reshape(1, -1)).item() < min_clearance:
+                pt = p1 + t * (p2 - p1)
+            smoothed.append(pt)
+
+    result    = np.array(smoothed)
+    result[0]  = path[0]
+    result[-1] = path[-1]
+    return result
+
+
 def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
     log.info("Building nav graph …")
     graph = _NavGraph(occupancy, vel, shape, domain)
@@ -423,6 +503,7 @@ def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
     dp = _astar(graph, s_ijk, g_ijk, use_wind=False)
     if dp is not None:
         dp[0] = origin_local;  dp[-1] = dest_local
+        dp       = _smooth_path(dp, graph, domain)
         d_energy = _energy(dp, graph)
         d_geo    = _to_geo(dp, domain)
     else:
@@ -436,6 +517,7 @@ def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
     wp = _astar(graph, s_ijk, g_ijk, use_wind=True)
     if wp is not None:
         wp[0] = origin_local;  wp[-1] = dest_local
+        wp       = _smooth_path(wp, graph, domain)
         w_energy = _energy(wp, graph)
     else:
         log.warning("Wind A* failed")
@@ -447,6 +529,7 @@ def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
         cp = _cuopt_route(graph, s_ijk, g_ijk)
         if cp is not None:
             cp[0] = origin_local;  cp[-1] = dest_local
+            cp       = _smooth_path(cp, graph, domain)
             c_energy = _energy(cp, graph)
             if w_energy is None or c_energy["energy_wh"] < w_energy["energy_wh"]:
                 wp, w_energy = cp, c_energy

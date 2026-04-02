@@ -32,6 +32,10 @@
         <option value="exchange-gherkin">Royal Exchange → Gherkin</option>
         <option value="liverpool-bishopsgate">Liverpool St → Bishopsgate</option>
         <option value="tower42-scalpel">Tower 42 → The Scalpel</option>
+        <optgroup label="Modelling Data">
+          <option value="guys-thomas">Guy's → St Thomas's</option>
+          <option value="nelson-georges">The Nelson → St George's</option>
+        </optgroup>
       </select>
 
       <div id="coord-inputs-section">
@@ -179,6 +183,15 @@
           <span class="layer-label">Streamline Seeds</span>
           <span class="pill-toggle">
             <input type="checkbox" id="ck-seeds">
+            <span class="pill-track"></span>
+          </span>
+        </label>
+
+        <label class="layer-row">
+          <span class="layer-icon" style="color:#ff7223">⬛</span>
+          <span class="layer-label">Occupancy Voxels</span>
+          <span class="pill-toggle">
+            <input type="checkbox" id="ck-occvox">
             <span class="pill-track"></span>
           </span>
         </label>
