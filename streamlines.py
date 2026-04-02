@@ -106,15 +106,17 @@ def _inside_building(p, occupancy, domain):
     return False
 
 
-def _trace(interps, sdf_interp, start, occupancy, domain):
+def _trace(interps, sdf_interp, start, occupancy, domain, max_steps=None):
     pos    = start.copy()
     path   = [pos.copy()]
     speeds = [np.linalg.norm(_vel_at(interps, pos))]
     stall  = 0
 
     _MAX_STEP_M = config.STREAMLINE_DT
+    if max_steps is None:
+        max_steps = config.STREAMLINE_MAX_STEPS
 
-    for _ in range(config.STREAMLINE_MAX_STEPS):
+    for _ in range(max_steps):
         v   = _vel_at(interps, pos)
         spd = np.linalg.norm(v)
         if spd < config.STREAMLINE_MIN_SPEED:
@@ -166,8 +168,13 @@ def _make_seeds(occupancy, domain, wind_deg):
     def _free(p):
         return not _inside_building(p, occupancy, domain)
 
+    # Scale seed counts with domain area relative to the default 200×200 m domain
+    _ref_area   = 200.0 * 200.0
+    _area_scale = math.sqrt((2 * half_x * 2 * half_y) / _ref_area)
+    _area_scale = max(1.0, _area_scale)
+
     # Inlet face
-    n_in = config.N_SEEDS_INLET
+    n_in = int(config.N_SEEDS_INLET * _area_scale)
     if abs(ca) >= abs(sa):
         x0 = -math.copysign(half_x * 0.97, ca)
         ys_ = rng.uniform(-half_y * 0.9, half_y * 0.9, n_in)
@@ -210,7 +217,7 @@ def _make_seeds(occupancy, domain, wind_deg):
         pts[:, 1] = pts[:, 1] * res - half_y
         pts[:, 2] = pts[:, 2] * res
         chosen = pts[rng.choice(len(pts),
-                                min(config.N_SEEDS_BUILDING, len(pts)),
+                                min(int(config.N_SEEDS_BUILDING * _area_scale), len(pts)),
                                 replace=False)]
         for pt in chosen:
             off = rng.randn(3) * 2.5
@@ -221,7 +228,7 @@ def _make_seeds(occupancy, domain, wind_deg):
                 seeds.append(s)
 
     # Street-level random
-    for _ in range(config.N_SEEDS_STREET):
+    for _ in range(int(config.N_SEEDS_STREET * _area_scale)):
         x = rng.uniform(-half_x * 0.85, half_x * 0.85)
         y = rng.uniform(-half_y * 0.85, half_y * 0.85)
         z = rng.uniform(2.0, 8.0)
@@ -275,6 +282,12 @@ def run(occupancy, coords, vel, shape, domain):
     print(f"    Dominant direction: {wind_deg:.0f}°  "
           f"(mean u={mean_v[0]:.2f} v={mean_v[1]:.2f} m/s)")
 
+    # Allow streamlines to cross the full domain diagonal (×1.5 for curved paths)
+    max_dim   = 2 * math.sqrt(domain["half_x"]**2 + domain["half_y"]**2)
+    max_steps = max(config.STREAMLINE_MAX_STEPS,
+                    int(max_dim * 1.5 / config.STREAMLINE_DT))
+    print(f"    Domain diagonal {max_dim:.0f} m → max {max_steps} steps/streamline")
+
     interps    = _build_interps(coords, vel, shape, occupancy, domain)
     sdf_interp = _build_sdf(occupancy, domain)
     seeds      = _make_seeds(occupancy, domain, wind_deg)
@@ -295,7 +308,7 @@ def run(occupancy, coords, vel, shape, domain):
     for s in seeds:
         if _inside_building(s, occupancy, domain):
             continue
-        path, spd = _trace(interps, sdf_interp, s, occupancy, domain)
+        path, spd = _trace(interps, sdf_interp, s, occupancy, domain, max_steps)
         if len(path) < 3:
             continue
         diffs  = np.diff(path, axis=0)

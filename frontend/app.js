@@ -31,9 +31,9 @@ const PRESETS = [
     origin: "51.5160, -0.0820", dest: "51.5130, -0.0815", oh: 95,  dh: 100 },
   // ── Modelling data routes ──────────────────────────────────────────────
   { name: "Guy's → St Thomas's",
-    origin: "51.50254, -0.08788", dest: "51.49914, -0.11759", oh: 30, dh: 30 },
+    origin: "51.50254, -0.08788", dest: "51.49914, -0.11759", oh: 40, dh: 40 },
   { name: "The Nelson → St George's",
-    origin: "51.410545, -0.209022", dest: "51.426072, -0.177525", oh: 30, dh: 30 },
+    origin: "51.410545, -0.209022", dest: "51.426072, -0.177525", oh: 40, dh: 40 },
 ];
 
 // Pipeline stage → stepper index
@@ -307,6 +307,14 @@ async function scanTileGeometry() {
 
 // ── Pipeline polling ──────────────────────────────────────────────────
 
+// Stages in pipeline order — used to detect when a stage has been passed
+const _STAGE_ORDER = [
+  'scanning','cache','geometry','wind','nemotron','lbm','streamlines','routing','cuopt','done','error'
+];
+function _pastStage(current, threshold) {
+  return _STAGE_ORDER.indexOf(current) > _STAGE_ORDER.indexOf(threshold);
+}
+
 async function pollPipeline() {
   const stageLabels = {
     scanning:    "Scanning tile geometry",
@@ -320,6 +328,10 @@ async function pollPipeline() {
     cuopt:       "cuOpt route optimisation",
   };
 
+  // Track which intermediate loads have already fired this pipeline run
+  let _occLoaded = false;
+  let _slLoaded  = false;
+
   for (let i = 0; i < 720; i++) {          // max 24 min
     await sleep(2000);
     try {
@@ -329,27 +341,36 @@ async function pollPipeline() {
       setStatus(`${label} — ${s.detail}`);
       setStep(s.stage);
 
-      if (s.stage === "done") {
-        finishProgress();
-        // Load results — retry a couple of times if files aren't flushed yet
+      // ── Progressive loads ────────────────────────────────────────────
+      // Geometry done → occupancy voxels ready
+      if (!_occLoaded && _pastStage(s.stage, 'geometry')) {
+        _occLoaded   = true;
+        occVoxLoaded = false;
+        if (document.getElementById("ck-occvox").checked) await loadOccVoxels();
+      }
+
+      // Streamlines done (routing has started) → streamlines + seeds ready
+      if (!_slLoaded && _pastStage(s.stage, 'streamlines')) {
+        _slLoaded   = true;
+        seedsLoaded = false;
         for (let retry = 0; retry < 3; retry++) {
-          await sleep(500);
+          await sleep(300);
           const ok = await loadStreamlines();
           if (ok) break;
         }
+        if (document.getElementById("ck-seeds").checked) await loadSeedPoints();
+      }
+
+      if (s.stage === "done") {
+        finishProgress();
+        // Routes + nav grid ready
         for (let retry = 0; retry < 3; retry++) {
           await sleep(500);
           const ok = await loadRoutes();
           if (ok) break;
         }
-        // Always reload nav-grid and seeds so they reflect the new domain/wind,
-        // regardless of whether they were previously loaded or the toggle state.
         navGridLoaded = false;
-        seedsLoaded   = false;
-        occVoxLoaded  = false;
         if (document.getElementById("ck-navgrid").checked) await loadNavGrid();
-        if (document.getElementById("ck-seeds").checked)   await loadSeedPoints();
-        if (document.getElementById("ck-occvox").checked)  await loadOccVoxels();
         return;
       }
 

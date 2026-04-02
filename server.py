@@ -84,11 +84,11 @@ def receive_coords():
     lat_per_m = 1.0 / 111_320.0
     lon_per_m = 1.0 / (111_320.0 * math.cos(math.radians(mid_lat)))
 
-    # 1.5× padding around the route bounding box
+    # Route bounding box + 100 m padding on each side
     dx_m   = abs(o_lon - d_lon) / lon_per_m
     dy_m   = abs(o_lat - d_lat) / lat_per_m
-    half_x = max(dx_m * 1.5, 150.0)
-    half_y = max(dy_m * 1.5, 150.0)
+    half_x = max(dx_m / 2 + 100.0, 150.0)
+    half_y = max(dy_m / 2 + 100.0, 150.0)
 
     config.set_domain(mid_lat, mid_lon, half_x, half_y,
                       o_lat, o_lon, o_h, d_lat, d_lon, d_h)
