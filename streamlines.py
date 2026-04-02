@@ -339,6 +339,17 @@ def run(occupancy, coords, vel, shape, domain):
     seeds      = _make_seeds(occupancy, domain, wind_deg)
     print(f"    {len(seeds)} seed points")
 
+    # Save seed positions for the frontend layer toggle
+    geh = domain.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
+    seed_geo = []
+    for s in seeds:
+        lon, lat = config.local_to_lonlat(s[0], s[1], domain)
+        seed_geo.append([round(lon, 6), round(lat, 6), round(float(s[2]) + geh, 1)])
+    config._ensure_dirs()
+    seed_path = os.path.join(config.STREAMLINE_DIR, "seed_points.json")
+    with open(seed_path, "w") as fh:
+        json.dump({"points": seed_geo}, fh)
+
     results = []
     n_short = n_loop = 0
     for s in seeds:

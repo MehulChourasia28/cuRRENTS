@@ -6,7 +6,6 @@ import numpy as np
 
 import config
 
-
 # ── Heightmap → 3-D occupancy ─────────────────────────────────────────
 
 def voxelize_from_heightmap(height_grid, sample_res, domain):

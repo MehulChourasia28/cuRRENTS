@@ -182,6 +182,24 @@ def get_routes():
         return jsonify(json.load(f))
 
 
+@app.route("/api/nav-grid")
+def get_nav_grid():
+    path = os.path.join(config.ROUTES_DIR, "nav_grid.json")
+    if not os.path.exists(path):
+        return jsonify({"error": "Not computed yet"}), 404
+    with open(path) as f:
+        return jsonify(json.load(f))
+
+
+@app.route("/api/seed-points")
+def get_seed_points():
+    path = os.path.join(config.STREAMLINE_DIR, "seed_points.json")
+    if not os.path.exists(path):
+        return jsonify({"error": "Not computed yet"}), 404
+    with open(path) as f:
+        return jsonify(json.load(f))
+
+
 # ── Start ─────────────────────────────────────────────────────────────
 
 def start():

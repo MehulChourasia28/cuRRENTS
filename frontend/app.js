@@ -9,6 +9,12 @@ const routeEntities  = [];
 let particles        = [];
 let pointCollection  = null;
 
+// Layer-toggle state
+let navGridCollection = null;
+let seedCollection    = null;
+let navGridLoaded     = false;
+let seedsLoaded       = false;
+
 // ── Presets ───────────────────────────────────────────────────────────
 
 const PRESETS = [
@@ -93,6 +99,31 @@ function wireControls() {
   document.getElementById("ck-glow").onchange     = rebuildStreamlines;
   document.getElementById("ck-particles").onchange= rebuildStreamlines;
   document.getElementById("preset-route").onchange= applyPreset;
+
+  // Layer visibility toggles
+  document.getElementById("ck-textures").onchange = e => {
+    if (tileset) {
+      if (e.target.checked) {
+        tileset.style = undefined;
+      } else {
+        tileset.style = new Cesium.Cesium3DTileStyle({ color: 'color("rgb(90, 95, 105)")' });
+      }
+    }
+  };
+  document.getElementById("ck-navgrid").onchange = async e => {
+    if (e.target.checked && !navGridLoaded) await loadNavGrid();
+    if (navGridCollection) navGridCollection.show = e.target.checked;
+  };
+  document.getElementById("ck-route-dist").onchange = e => setRouteVisibility("dist", e.target.checked);
+  document.getElementById("ck-route-wind").onchange = e => setRouteVisibility("wind", e.target.checked);
+  document.getElementById("ck-streamlines").onchange = e => {
+    primaries.forEach(p => p.show = e.target.checked);
+    if (pointCollection) pointCollection.show = e.target.checked;
+  };
+  document.getElementById("ck-seeds").onchange = async e => {
+    if (e.target.checked && !seedsLoaded) await loadSeedPoints();
+    if (seedCollection) seedCollection.show = e.target.checked;
+  };
 }
 
 function applyPreset() {
@@ -354,16 +385,23 @@ function renderRoutes() {
   const dr = routeData.distance_route;
   const wr = routeData.wind_route;
   if (dr && dr.path && dr.path.length > 1)
-    addRoutePolyline(dr.path, new Cesium.Color(0, 0.82, 1.0, 0.85), 3, false);
+    addRoutePolyline(dr.path, new Cesium.Color(0, 0.82, 1.0, 0.85), 3, false, "dist");
   if (wr && wr.path && wr.path.length > 1)
-    addRoutePolyline(wr.path, new Cesium.Color(0.46, 0.73, 0, 1.0),  5, true);
+    addRoutePolyline(wr.path, new Cesium.Color(0.46, 0.73, 0, 1.0),  5, true,  "wind");
   if (dr && dr.path && dr.path.length > 0) {
     addMarker(dr.path[0],                  "A", Cesium.Color.fromCssColorString("#00d2ff"));
     addMarker(dr.path[dr.path.length - 1], "B", Cesium.Color.fromCssColorString("#76B900"));
   }
+  // Respect current toggle state
+  setRouteVisibility("dist", document.getElementById("ck-route-dist").checked);
+  setRouteVisibility("wind", document.getElementById("ck-route-wind").checked);
 }
 
-function addRoutePolyline(path, color, width, glow) {
+function setRouteVisibility(tag, show) {
+  routePrims.forEach(p => { if (p._routeTag === tag) p.show = show; });
+}
+
+function addRoutePolyline(path, color, width, glow, tag) {
   const positions = path.map(p => Cesium.Cartesian3.fromDegrees(p[0], p[1], p[2]));
   const n = positions.length;
   const mkPrim = (lineWidth, col) => {
@@ -378,6 +416,7 @@ function addRoutePolyline(path, color, width, glow) {
         appearance: new Cesium.PolylineColorAppearance({ translucent: true }),
         asynchronous: true,
       });
+      prim._routeTag = tag;
       viewer.scene.primitives.add(prim);
       routePrims.push(prim);
     } catch (e) { console.error("polyline error", e); }
@@ -457,6 +496,10 @@ function rebuildStreamlines() {
     addPolylines(currentData, opacity * 0.22, width * 3);
   if (document.getElementById("ck-particles").checked)
     initParticles(currentData);
+  // Respect current layer toggle
+  const show = document.getElementById("ck-streamlines").checked;
+  primaries.forEach(p => p.show = show);
+  if (pointCollection) pointCollection.show = show;
 }
 
 function addPolylines(data, opacity, width) {
@@ -504,6 +547,16 @@ function clearStreamlines() {
 function clearAll() {
   clearStreamlines();
   clearRoutes();
+  if (navGridCollection) {
+    viewer.scene.primitives.remove(navGridCollection);
+    navGridCollection = null;
+    navGridLoaded     = false;
+  }
+  if (seedCollection) {
+    viewer.scene.primitives.remove(seedCollection);
+    seedCollection = null;
+    seedsLoaded    = false;
+  }
   currentData = null;
   routeData   = null;
   document.getElementById("route-results").classList.add("hidden");
@@ -549,6 +602,50 @@ function tick() {
       p.sl.colors[idx*4+2]/255, 0.85);
     p.point.pixelSize = 4 + (p.sl.colors[idx*4+3]/255) * 4;
   }
+}
+
+// ── Layer loaders ──────────────────────────────────────────────────────
+
+async function loadNavGrid() {
+  try {
+    const r = await fetch("/api/nav-grid");
+    if (!r.ok) return;
+    const data = await r.json();
+    if (navGridCollection) viewer.scene.primitives.remove(navGridCollection);
+    navGridCollection = new Cesium.PointPrimitiveCollection();
+    viewer.scene.primitives.add(navGridCollection);
+    navGridCollection.show = document.getElementById("ck-navgrid").checked;
+    for (const [lon, lat, height, blocked] of data.points) {
+      navGridCollection.add({
+        position:  Cesium.Cartesian3.fromDegrees(lon, lat, height),
+        pixelSize: blocked ? 4 : 2,
+        color:     blocked
+          ? new Cesium.Color(1.0, 0.35, 0.1, 0.75)
+          : new Cesium.Color(0.2, 0.9, 0.5, 0.18),
+      });
+    }
+    navGridLoaded = true;
+  } catch (e) { console.warn("loadNavGrid:", e); }
+}
+
+async function loadSeedPoints() {
+  try {
+    const r = await fetch("/api/seed-points");
+    if (!r.ok) return;
+    const data = await r.json();
+    if (seedCollection) viewer.scene.primitives.remove(seedCollection);
+    seedCollection = new Cesium.PointPrimitiveCollection();
+    viewer.scene.primitives.add(seedCollection);
+    seedCollection.show = document.getElementById("ck-seeds").checked;
+    for (const [lon, lat, height] of data.points) {
+      seedCollection.add({
+        position:  Cesium.Cartesian3.fromDegrees(lon, lat, height),
+        pixelSize: 5,
+        color:     new Cesium.Color(1.0, 0.88, 0.1, 0.85),
+      });
+    }
+    seedsLoaded = true;
+  } catch (e) { console.warn("loadSeedPoints:", e); }
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────

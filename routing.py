@@ -200,6 +200,22 @@ class _NavGraph:
         pt = xyz.reshape(1,-1)
         return np.array([f(pt).item() for f in self._vel_interps])
 
+    def save_nav_grid(self, domain, out_path):
+        """Save a sampled nav grid to JSON for the frontend layer toggle."""
+        geh  = domain.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
+        pts  = []
+        step = max(1, self.nx // 40)   # ~40 samples across domain → manageable size
+        for ix in range(0, self.nx, step):
+            for iy in range(0, self.ny, step):
+                for iz in range(0, self.nz, max(1, self.nz // 3)):
+                    lon, lat = config.local_to_lonlat(
+                        self._xs[ix], self._ys[iy], domain)
+                    h = round(self._zs[iz] + geh, 1)
+                    pts.append([round(lon, 6), round(lat, 6), h,
+                                int(self.blocked[ix, iy, iz])])
+        with open(out_path, "w") as f:
+            json.dump({"points": pts}, f)
+
 
 # ══════════════════════════════════════════════════════════════════════
 # A* pathfinding
@@ -536,5 +552,7 @@ def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
     config._ensure_dirs()
     with open(os.path.join(config.ROUTES_DIR, "routes.json"), "w") as f:
         json.dump(result, f)
+
+    graph.save_nav_grid(domain, os.path.join(config.ROUTES_DIR, "nav_grid.json"))
 
     return result
