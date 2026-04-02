@@ -1,32 +1,15 @@
-"""
-Drone route optimisation through a 3-D wind field.
-
-Two routes are computed:
-  1. Distance-only  — A* on Euclidean edge costs
-  2. Wind-optimised — A* on wind-aware edge costs
-         (+ cuOpt waypoint optimisation if NIM_API_KEY is set)
-
-The route with lower computed energy is chosen as the wind route.
-
-Public API
-----------
-    compute_routes(occupancy, vel, shape, origin_local, dest_local, domain)
-        → dict  (written to data/routes/routes.json)
-"""
-from __future__ import annotations
-
+import collections
 import heapq
 import json
 import logging
 import math
 import os
 import time
-from typing import Optional
 
 import numpy as np
 import requests
 from scipy.interpolate import RegularGridInterpolator
-from scipy.ndimage import zoom
+from scipy.ndimage import binary_dilation
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 
@@ -38,10 +21,6 @@ _AIR_RHO = 1.225  # kg/m³
 _G       = 9.81
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Navigation graph
-# ══════════════════════════════════════════════════════════════════════
-
 class _NavGraph:
     _NEIGHBOURS = [(dx, dy, dz)
                    for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1)
@@ -49,21 +28,22 @@ class _NavGraph:
 
     def __init__(self, occupancy, vel, shape, domain):
         res    = config.ROUTING_GRID_RES
+        res_z  = config.ROUTING_GRID_RES_Z
         half_x = domain["half_x"]
         half_y = domain["half_y"]
         height = domain["height"]
 
         self.nx = max(2, int(2 * half_x / res))
         self.ny = max(2, int(2 * half_y / res))
-        self.nz = max(2, int(height / res))
-        self.res = res
+        self.nz = max(2, int(height / res_z))
+        self.res   = res
+        self.res_z = res_z
 
-        # Max-pool occupancy to routing resolution
-        self.blocked = self._maxpool(occupancy > 0.5,
-                                     self.nx, self.ny, self.nz)
+        self.blocked = self._maxpool(occupancy > 0.5, self.nx, self.ny, self.nz)
+        # Dilate 2 cells horizontally so routes stay well away from building faces
+        struct = np.ones((3, 3, 1), dtype=bool)
+        self.blocked = binary_dilation(self.blocked, structure=struct, iterations=2)
 
-        # Velocity interpolators from LBM field
-        # vel shape: (N, 3),  shape: (inx, iny, inz)
         inx, iny, inz = shape
         vel_3d = vel.reshape(inx, iny, inz, 3)
         xs_v = np.linspace(-half_x, half_x, inx)
@@ -146,9 +126,9 @@ class _NavGraph:
             w_spd     = np.linalg.norm(wind, axis=1)
             max_ws    = max(float(w_spd.max()), 1.0)
 
-            hw_pen   = np.clip(headwind,  0, None) / max_ws
-            sp_pen   = w_spd / max_ws
-            tw_bonus = np.clip(-headwind, 0, None) / max_ws * 0.25
+            hw_pen    = np.clip(headwind,  0, None) / max_ws
+            sp_pen    = w_spd / max_ws
+            tw_bonus  = np.clip(-headwind, 0, None) / max_ws * 0.25
             wind_cost = dist * np.clip(
                 1.0 + config.WIND_COST_ALPHA * hw_pen
                     + config.WIND_COST_BETA  * sp_pen
@@ -161,11 +141,11 @@ class _NavGraph:
             empty = csr_matrix((nx*ny*nz, nx*ny*nz))
             return empty, empty
 
-        R    = np.concatenate(all_r)
-        C    = np.concatenate(all_c)
-        D    = np.concatenate(all_d).astype(np.float32)
-        W    = np.concatenate(all_w).astype(np.float32)
-        n    = nx * ny * nz
+        R = np.concatenate(all_r)
+        C = np.concatenate(all_c)
+        D = np.concatenate(all_d).astype(np.float32)
+        W = np.concatenate(all_w).astype(np.float32)
+        n = nx * ny * nz
         log.info("Sparse graph: %d edges", len(R))
         return csr_matrix((D,(R,C)), shape=(n,n)), csr_matrix((W,(R,C)), shape=(n,n))
 
@@ -183,17 +163,23 @@ class _NavGraph:
         return np.array([self._xs[ix], self._ys[iy], self._zs[iz]])
 
     def nearest_free(self, xyz):
-        """Snap xyz to the nearest free (unblocked) cell."""
         ix = int(np.clip(np.searchsorted(self._xs, xyz[0]), 0, self.nx-1))
         iy = int(np.clip(np.searchsorted(self._ys, xyz[1]), 0, self.ny-1))
         iz = int(np.clip(np.searchsorted(self._zs, xyz[2]), 0, self.nz-1))
         if not self.blocked[ix, iy, iz]:
             return ix, iy, iz
-        # Search upward first, then spiral outward
-        for dz in range(1, self.nz):
-            tz = min(iz+dz, self.nz-1)
-            if not self.blocked[ix, iy, tz]:
-                return ix, iy, tz
+        queue   = collections.deque([(ix, iy, iz)])
+        visited = {(ix, iy, iz)}
+        while queue:
+            cx, cy, cz = queue.popleft()
+            for dx, dy, dz in ((1,0,0),(-1,0,0),(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)):
+                nx_, ny_, nz_ = cx+dx, cy+dy, cz+dz
+                if 0 <= nx_ < self.nx and 0 <= ny_ < self.ny and 0 <= nz_ < self.nz:
+                    if (nx_, ny_, nz_) not in visited:
+                        if not self.blocked[nx_, ny_, nz_]:
+                            return nx_, ny_, nz_
+                        visited.add((nx_, ny_, nz_))
+                        queue.append((nx_, ny_, nz_))
         return ix, iy, self.nz-1
 
     def wind_at(self, xyz):
@@ -201,25 +187,19 @@ class _NavGraph:
         return np.array([f(pt).item() for f in self._vel_interps])
 
     def save_nav_grid(self, domain, out_path):
-        """Save a sampled nav grid to JSON for the frontend layer toggle."""
         geh  = domain.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
         pts  = []
-        step = max(1, self.nx // 40)   # ~40 samples across domain → manageable size
+        step = max(1, self.nx // 40)
         for ix in range(0, self.nx, step):
             for iy in range(0, self.ny, step):
-                for iz in range(0, self.nz, max(1, self.nz // 3)):
-                    lon, lat = config.local_to_lonlat(
-                        self._xs[ix], self._ys[iy], domain)
-                    h = round(self._zs[iz] + geh, 1)
-                    pts.append([round(lon, 6), round(lat, 6), h,
+                for iz in range(self.nz):
+                    lon, lat = config.local_to_lonlat(self._xs[ix], self._ys[iy], domain)
+                    pts.append([round(lon, 6), round(lat, 6),
+                                round(self._zs[iz] + geh, 1),
                                 int(self.blocked[ix, iy, iz])])
         with open(out_path, "w") as f:
             json.dump({"points": pts}, f)
 
-
-# ══════════════════════════════════════════════════════════════════════
-# A* pathfinding
-# ══════════════════════════════════════════════════════════════════════
 
 def _astar(graph, start_ijk, goal_ijk, use_wind):
     sp = graph._sp_wind if use_wind else graph._sp_dist
@@ -234,7 +214,7 @@ def _astar(graph, start_ijk, goal_ijk, use_wind):
     visited   = set()
     open_set  = [(0.0, si)]
     goal_pos  = graph.pos(*goal_ijk)
-    h_scale   = 0.1 if use_wind else 1.0  # admissible even with tailwind
+    h_scale   = 0.1 if use_wind else 1.0  # keep heuristic admissible with tailwind
 
     while open_set:
         _, cur = heapq.heappop(open_set)
@@ -252,8 +232,8 @@ def _astar(graph, start_ijk, goal_ijk, use_wind):
                 continue
             tg = g_score[cur] + ec
             if tg < g_score.get(ni, 1e18):
-                g_score[ni]    = tg
-                came_from[ni]  = cur
+                g_score[ni]   = tg
+                came_from[ni] = cur
                 h = h_scale * float(np.linalg.norm(graph.pos(*graph.ijk(ni)) - goal_pos))
                 heapq.heappush(open_set, (tg+h, ni))
 
@@ -267,32 +247,6 @@ def _astar(graph, start_ijk, goal_ijk, use_wind):
 
     return np.array([graph.pos(*graph.ijk(fi)) for fi in idx_list])
 
-
-# ── Path post-processing ──────────────────────────────────────────────
-
-def _smooth(pts, window=7):
-    if len(pts) <= window:
-        return pts
-    hw = window // 2
-    out = pts.copy()
-    for i in range(hw, len(pts)-hw):
-        out[i] = pts[max(0,i-hw):i+hw+1].mean(axis=0)
-    out[0] = pts[0];  out[-1] = pts[-1]
-    return out
-
-
-def _lift_blocked(path, graph):
-    """Push any waypoint that lands in a blocked cell upward."""
-    out = path.copy()
-    for i in range(len(out)):
-        ix, iy, iz = graph.nearest_free(out[i])
-        out[i] = graph.pos(ix, iy, iz)
-    out[0]  = path[0]
-    out[-1] = path[-1]
-    return out
-
-
-# ── Energy model ──────────────────────────────────────────────────────
 
 def _energy(path, graph):
     m        = config.DRONE_MASS
@@ -334,12 +288,10 @@ def _mean_wind_speed(path, graph):
     return float(np.mean([np.linalg.norm(graph.wind_at(p)) for p in path]))
 
 
-# ── cuOpt (optional) ──────────────────────────────────────────────────
-
 def _call_cuopt(cost_matrix, origin_idx, dest_idx):
     if not config.NIM_API_KEY:
         return None
-    n = cost_matrix.shape[0]
+    n        = cost_matrix.shape[0]
     task_idx = [i for i in range(n) if i != origin_idx]
     prizes   = [999999.0 if i == dest_idx else 0.0 for i in task_idx]
 
@@ -370,7 +322,7 @@ def _call_cuopt(cost_matrix, origin_idx, dest_idx):
             resp = r.json()
         elif r.status_code == 202:
             req_id = r.json().get("reqId")
-            resp = None
+            resp   = None
             for _ in range(30):
                 time.sleep(2)
                 pr = requests.get(f"{config.CUOPT_ENDPOINT}/status/{req_id}",
@@ -395,11 +347,10 @@ def _call_cuopt(cost_matrix, origin_idx, dest_idx):
 
 
 def _cuopt_route(graph, start_ijk, goal_ijk):
-    """Build waypoints → call cuOpt → stitch with A* → return path."""
-    s_pos = graph.pos(*start_ijk)
-    g_pos = graph.pos(*goal_ijk)
+    s_pos    = graph.pos(*start_ijk)
+    g_pos    = graph.pos(*goal_ijk)
     corridor = g_pos - s_pos
-    c_len = np.linalg.norm(corridor)
+    c_len    = np.linalg.norm(corridor)
     if c_len < 1:
         return None
     c_dir = corridor / c_len
@@ -421,19 +372,16 @@ def _cuopt_route(graph, start_ijk, goal_ijk):
         wpts.append((ix, iy, iz))
     wpts.append(goal_ijk)
 
-    # Deduplicate
     seen = set(); unique = []
     for w in wpts:
         if w not in seen:
             seen.add(w); unique.append(w)
     wpts = unique
 
-    # All-pairs wind cost via Dijkstra
     flat  = np.array([graph.idx(*w) for w in wpts], dtype=np.int32)
-    d_mat = shortest_path(graph._sp_wind, method="D",
-                          directed=False, indices=flat)
-    n_w = len(wpts)
-    cost = np.full((n_w, n_w), 1e9)
+    d_mat = shortest_path(graph._sp_wind, method="D", directed=False, indices=flat)
+    n_w   = len(wpts)
+    cost  = np.full((n_w, n_w), 1e9)
     for i in range(n_w):
         for j in range(n_w):
             v = d_mat[i, flat[j]]
@@ -444,11 +392,10 @@ def _cuopt_route(graph, start_ijk, goal_ijk):
     if route_idx is None:
         return None
 
-    # Stitch A* segments
     full = []
     for i in range(len(route_idx)-1):
-        a = wpts[route_idx[i]]
-        b = wpts[route_idx[i+1]]
+        a   = wpts[route_idx[i]]
+        b   = wpts[route_idx[i+1]]
         seg = _astar(graph, a, b, use_wind=True)
         if seg is None:
             continue
@@ -456,8 +403,6 @@ def _cuopt_route(graph, start_ijk, goal_ijk):
 
     return np.array(full) if full else None
 
-
-# ── Local → geo ───────────────────────────────────────────────────────
 
 def _to_geo(path, domain):
     geh = domain.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
@@ -468,22 +413,15 @@ def _to_geo(path, domain):
     return out
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Public API
-# ══════════════════════════════════════════════════════════════════════
-
 def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
-    """Compute and save both routes.  Returns result dict."""
     log.info("Building nav graph …")
-    graph  = _NavGraph(occupancy, vel, shape, domain)
-    s_ijk  = graph.nearest_free(origin_local)
-    g_ijk  = graph.nearest_free(dest_local)
+    graph = _NavGraph(occupancy, vel, shape, domain)
+    s_ijk = graph.nearest_free(origin_local)
+    g_ijk = graph.nearest_free(dest_local)
 
-    # ── Distance route ────────────────────────────────────────────
     log.info("A* distance route …")
     dp = _astar(graph, s_ijk, g_ijk, use_wind=False)
     if dp is not None:
-        dp = _smooth(_lift_blocked(dp, graph))
         dp[0] = origin_local;  dp[-1] = dest_local
         d_energy = _energy(dp, graph)
         d_geo    = _to_geo(dp, domain)
@@ -492,27 +430,22 @@ def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
         d_energy = {"energy_wh":0, "distance_m":0, "time_s":0}
         d_geo    = []
 
-    log.info("  Dist route: %.0f m  %.1f Wh",
-             d_energy["distance_m"], d_energy["energy_wh"])
+    log.info("  Dist route: %.0f m  %.1f Wh", d_energy["distance_m"], d_energy["energy_wh"])
 
-    # ── Wind-optimised route ──────────────────────────────────────
     log.info("A* wind-aware route …")
     wp = _astar(graph, s_ijk, g_ijk, use_wind=True)
     if wp is not None:
-        wp = _smooth(_lift_blocked(wp, graph))
         wp[0] = origin_local;  wp[-1] = dest_local
         w_energy = _energy(wp, graph)
     else:
         log.warning("Wind A* failed")
         w_energy = None
-        wp = None
+        wp       = None
 
-    # Try cuOpt if API key present
     if config.NIM_API_KEY:
         log.info("cuOpt route …")
         cp = _cuopt_route(graph, s_ijk, g_ijk)
         if cp is not None:
-            cp = _smooth(_lift_blocked(cp, graph))
             cp[0] = origin_local;  cp[-1] = dest_local
             c_energy = _energy(cp, graph)
             if w_energy is None or c_energy["energy_wh"] < w_energy["energy_wh"]:
@@ -524,21 +457,17 @@ def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
         w_energy = _energy(wp, graph) if dp is not None else {"energy_wh":0,"distance_m":0,"time_s":0}
 
     w_geo = _to_geo(wp, domain)
-    log.info("  Wind route: %.0f m  %.1f Wh",
-             w_energy["distance_m"], w_energy["energy_wh"])
+    log.info("  Wind route: %.0f m  %.1f Wh", w_energy["distance_m"], w_energy["energy_wh"])
 
-    # ── Savings ───────────────────────────────────────────────────
-    e_d = d_energy["energy_wh"]
-    e_w = w_energy["energy_wh"]
+    e_d     = d_energy["energy_wh"]
+    e_w     = w_energy["energy_wh"]
     savings = round((e_d - e_w) / e_d * 100, 1) if e_d > 0 else 0.0
 
-    # Mean wind exposure
     mean_w_d = _mean_wind_speed(dp, graph) if dp is not None else 0.0
     mean_w_w = _mean_wind_speed(wp, graph)
     wind_red = round((mean_w_d - mean_w_w) / mean_w_d * 100, 1) if mean_w_d > 0 else 0.0
 
-    log.info("  Energy saving: %.1f%%   Wind exposure reduction: %.1f%%",
-             savings, wind_red)
+    log.info("  Energy saving: %.1f%%   Wind reduction: %.1f%%", savings, wind_red)
 
     result = {
         "distance_route": {"path": d_geo, **d_energy},

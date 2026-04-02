@@ -331,6 +331,12 @@ async function pollPipeline() {
           const ok = await loadRoutes();
           if (ok) break;
         }
+        // Always reload nav-grid and seeds so they reflect the new domain/wind,
+        // regardless of whether they were previously loaded or the toggle state.
+        navGridLoaded = false;
+        seedsLoaded   = false;
+        if (document.getElementById("ck-navgrid").checked) await loadNavGrid();
+        if (document.getElementById("ck-seeds").checked)   await loadSeedPoints();
         return;
       }
 
@@ -348,7 +354,7 @@ async function pollPipeline() {
 
 async function loadStreamlines() {
   try {
-    const r = await fetch("/api/streamlines/combined");
+    const r = await fetch(`/api/streamlines/combined?t=${Date.now()}`);
     if (!r.ok) return false;
     currentData = await r.json();
     if (!currentData.streamlines || currentData.streamlines.length === 0) {
@@ -367,7 +373,7 @@ async function loadStreamlines() {
 
 async function loadRoutes() {
   try {
-    const r = await fetch("/api/routes");
+    const r = await fetch(`/api/routes?t=${Date.now()}`);
     if (!r.ok) return false;
     routeData = await r.json();
     renderRoutes();
@@ -608,7 +614,7 @@ function tick() {
 
 async function loadNavGrid() {
   try {
-    const r = await fetch("/api/nav-grid");
+    const r = await fetch(`/api/nav-grid?t=${Date.now()}`);
     if (!r.ok) return;
     const data = await r.json();
     if (navGridCollection) viewer.scene.primitives.remove(navGridCollection);
@@ -630,7 +636,7 @@ async function loadNavGrid() {
 
 async function loadSeedPoints() {
   try {
-    const r = await fetch("/api/seed-points");
+    const r = await fetch(`/api/seed-points?t=${Date.now()}`);
     if (!r.ok) return;
     const data = await r.json();
     if (seedCollection) viewer.scene.primitives.remove(seedCollection);

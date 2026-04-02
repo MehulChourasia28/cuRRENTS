@@ -28,9 +28,7 @@ _U_LATTICE = config.LBM_U_LATTICE
 _RE        = config.LBM_RE
 
 
-# ══════════════════════════════════════════════════════════════════════
 # In-process solve (runs inside subprocess)
-# ══════════════════════════════════════════════════════════════════════
 
 def _solve_inproc(occ_path, out_dir, angle_deg, grid_res, num_steps,
                   wind_speed_ms, half_x, half_y, height, u_lat=None):
@@ -52,19 +50,16 @@ def _solve_inproc(occ_path, out_dir, angle_deg, grid_res, num_steps,
     ny  = max(4, int(2 * half_y / grid_res))
     nz  = max(4, int(height    / grid_res))
 
-    # ── XLB init ──────────────────────────────────────────────────
     pp = PrecisionPolicy.FP32FP32
     cb = ComputeBackend.WARP
     vs = xlb.velocity_set.D3Q27(precision_policy=pp, compute_backend=cb)
     xlb.init(velocity_set=vs, default_backend=cb, default_precision_policy=pp)
     grid = grid_factory((nx, ny, nz), compute_backend=cb)
 
-    # ── Viscosity / relaxation ────────────────────────────────────
     visc  = u_lat * (min(nx, ny) - 1) / _RE
     omega = 1.0 / (3.0 * visc + 0.5)
     omega = min(omega, 1.7)  # cap for stability
 
-    # ── Boundary conditions ────────────────────────────────────────
     box    = grid.bounding_box_indices()
     box_ne = grid.bounding_box_indices(remove_edges=True)
 
@@ -119,7 +114,6 @@ def _solve_inproc(occ_path, out_dir, angle_deg, grid_res, num_steps,
     if len(bldg[0]) > 0:
         bcs.append(HalfwayBounceBackBC(indices=bldg))
 
-    # ── Run ────────────────────────────────────────────────────────
     stepper = IncompressibleNavierStokesStepper(
         grid=grid, boundary_conditions=bcs, collision_type="BGK")
     f0, f1, bc_mask, missing_mask = stepper.prepare_fields()
@@ -134,7 +128,6 @@ def _solve_inproc(occ_path, out_dir, angle_deg, grid_res, num_steps,
     dt_s = time.time() - t0
     print(f"  {num_steps} steps in {dt_s:.1f}s  ({nx*ny*nz*num_steps/dt_s/1e6:.0f} MLUPS)")
 
-    # ── Extract velocity ───────────────────────────────────────────
     c_np  = np.array(vs.c).reshape(vs.d, vs.q)  # (3, Q)
     f_np  = f0.numpy()                            # (Q, nx, ny, nz)
     rho   = f_np.sum(axis=0)
@@ -169,9 +162,7 @@ def _solve_inproc(occ_path, out_dir, angle_deg, grid_res, num_steps,
     np.save(os.path.join(out_dir, "shape.npy"),  np.array([inx, iny, inz]))
 
 
-# ══════════════════════════════════════════════════════════════════════
 # Public API — spawns subprocess
-# ══════════════════════════════════════════════════════════════════════
 
 def solve_wind(occupancy, angle_deg, wind_speed_ms,
                domain=None, grid_res=None, num_steps=None):
@@ -229,9 +220,7 @@ def solve_wind(occupancy, angle_deg, wind_speed_ms,
     return coords, vel, shape
 
 
-# ══════════════════════════════════════════════════════════════════════
 # Subprocess entry point
-# ══════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     cache_root = os.environ.get("WARP_CACHE_PATH")

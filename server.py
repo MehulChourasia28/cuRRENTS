@@ -14,8 +14,7 @@ _BASE = os.path.dirname(os.path.abspath(__file__))
 app   = Flask(__name__, static_folder=os.path.join(_BASE, "frontend"))
 CORS(app)
 
-# ── Pipeline synchronisation ──────────────────────────────────────────
-# The pipeline loop waits on these events.
+# Events the pipeline loop waits on
 _coords_event    = threading.Event()
 _heightmap_event = threading.Event()
 _pipeline_status = {"stage": "idle", "detail": ""}
@@ -41,8 +40,6 @@ def reset_events():
     _heightmap_event.clear()
 
 
-# ── Static ────────────────────────────────────────────────────────────
-
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -53,24 +50,20 @@ def static_files(fn):
     return send_from_directory(app.static_folder, fn)
 
 
-# ── Config ────────────────────────────────────────────────────────────
-
 @app.route("/api/config")
 def get_config():
     return jsonify({
-        "cesium_token":           config.CESIUM_ION_TOKEN,
-        "center_lat":             config.DOMAIN_CENTER_LAT,
-        "center_lon":             config.DOMAIN_CENTER_LON,
-        "domain_half_x":          config.DOMAIN_HALF_X,
-        "domain_half_y":          config.DOMAIN_HALF_Y,
-        "domain_height":          config.DOMAIN_HEIGHT,
-        "heightmap_sample_res":   config.HEIGHTMAP_SAMPLE_RES,
-        "ground_ellipsoid_height":config.GROUND_ELLIPSOID_HEIGHT,
-        "voxel_resolution":       config.VOXEL_RESOLUTION,
+        "cesium_token":            config.CESIUM_ION_TOKEN,
+        "center_lat":              config.DOMAIN_CENTER_LAT,
+        "center_lon":              config.DOMAIN_CENTER_LON,
+        "domain_half_x":           config.DOMAIN_HALF_X,
+        "domain_half_y":           config.DOMAIN_HALF_Y,
+        "domain_height":           config.DOMAIN_HEIGHT,
+        "heightmap_sample_res":    config.HEIGHTMAP_SAMPLE_RES,
+        "ground_ellipsoid_height": config.GROUND_ELLIPSOID_HEIGHT,
+        "voxel_resolution":        config.VOXEL_RESOLUTION,
     })
 
-
-# ── Coordinates ───────────────────────────────────────────────────────
 
 @app.route("/api/coords", methods=["POST"])
 def receive_coords():
@@ -91,9 +84,9 @@ def receive_coords():
     lat_per_m = 1.0 / 111_320.0
     lon_per_m = 1.0 / (111_320.0 * math.cos(math.radians(mid_lat)))
 
-    # Domain is the bounding box of the route, with 1.5× padding
-    dx_m  = abs(o_lon - d_lon) / lon_per_m
-    dy_m  = abs(o_lat - d_lat) / lat_per_m
+    # 1.5× padding around the route bounding box
+    dx_m   = abs(o_lon - d_lon) / lon_per_m
+    dy_m   = abs(o_lat - d_lat) / lat_per_m
     half_x = max(dx_m * 1.5, 150.0)
     half_y = max(dy_m * 1.5, 150.0)
 
@@ -113,15 +106,11 @@ def receive_coords():
     })
 
 
-# ── Pipeline status ───────────────────────────────────────────────────
-
 @app.route("/api/pipeline-status")
 def pipeline_status():
     with _status_lock:
         return jsonify(dict(_pipeline_status))
 
-
-# ── Heightmap upload ──────────────────────────────────────────────────
 
 @app.route("/api/heightmap", methods=["POST"])
 def receive_heightmap():
@@ -137,11 +126,9 @@ def receive_heightmap():
     if heights.size != nx * ny:
         return jsonify({"error": f"Expected {nx*ny} samples, got {heights.size}"}), 400
 
-    height_grid = heights.reshape(ny, nx)
-
     import geometry
     dom = config.snapshot()
-    occ, ground_h = geometry.voxelize_from_heightmap(height_grid, sample_res, dom)
+    occ, ground_h = geometry.voxelize_from_heightmap(heights.reshape(ny, nx), sample_res, dom)
     config.GROUND_ELLIPSOID_HEIGHT = ground_h
     geometry.save_geometry(occ, dom, ground_h)
 
@@ -150,8 +137,6 @@ def receive_heightmap():
     _heightmap_event.set()
     return jsonify({"status": "ok", "coverage": round(coverage, 1)})
 
-
-# ── Streamlines ───────────────────────────────────────────────────────
 
 @app.route("/api/streamlines/combined")
 def get_streamlines():
@@ -170,8 +155,6 @@ def get_metadata():
     with open(path) as f:
         return jsonify(json.load(f))
 
-
-# ── Routes ────────────────────────────────────────────────────────────
 
 @app.route("/api/routes")
 def get_routes():
@@ -199,8 +182,6 @@ def get_seed_points():
     with open(path) as f:
         return jsonify(json.load(f))
 
-
-# ── Start ─────────────────────────────────────────────────────────────
 
 def start():
     print(f"\n{'='*55}")

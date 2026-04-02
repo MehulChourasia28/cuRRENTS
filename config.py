@@ -1,9 +1,3 @@
-"""Configuration — all domain state lives here.
-
-Module-level globals are the source of truth.  The server thread mutates them
-via set_domain(); the pipeline thread reads them.  A threading.Lock guards the
-few places where atomicity matters (domain snapshot).
-"""
 import os
 import math
 import threading
@@ -12,12 +6,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# ── API keys ──────────────────────────────────────────────────────────
 NIM_API_KEY          = os.environ.get("NIM_API_KEY", "")
 OPENWEATHER_API_KEY  = os.environ.get("OPEN_WEATHER_API_KEY", "")
 CESIUM_ION_TOKEN     = os.environ.get("CESIUM_ION_TOKEN", "")
 
-# ── Domain (overwritten by /api/coords) ───────────────────────────────
+# Domain defaults — overwritten by /api/coords on each request
 DOMAIN_CENTER_LAT = 51.5135
 DOMAIN_CENTER_LON = -0.0850
 DOMAIN_HALF_X     = 200.0   # metres
@@ -39,7 +32,6 @@ _domain_lock = threading.Lock()
 def set_domain(center_lat, center_lon, half_x, half_y,
                origin_lat, origin_lon, origin_h,
                dest_lat, dest_lon, dest_h):
-    """Atomically update all domain/route globals."""
     global DOMAIN_CENTER_LAT, DOMAIN_CENTER_LON
     global DOMAIN_HALF_X, DOMAIN_HALF_Y
     global ORIGIN_LAT, ORIGIN_LON, ORIGIN_HEIGHT
@@ -58,7 +50,6 @@ def set_domain(center_lat, center_lon, half_x, half_y,
 
 
 def snapshot():
-    """Return a frozen copy of all domain parameters (thread-safe)."""
     with _domain_lock:
         return dict(
             center_lat=DOMAIN_CENTER_LAT,
@@ -76,23 +67,23 @@ def snapshot():
         )
 
 
-# ── Voxelisation ──────────────────────────────────────────────────────
+# Voxelisation
 VOXEL_RESOLUTION      = 2.0   # metres
 HEIGHTMAP_SAMPLE_RES  = 4.0
 HEIGHTMAP_MIN_BUILDING= 3.0
-BUILDING_H_DILATE     = 2     # dilation iterations for building mask
+BUILDING_H_DILATE     = 2
 
-# ── LBM solver ────────────────────────────────────────────────────────
-LBM_GRID_RES  = 4.0   # metres per LBM cell
-LBM_U_LATTICE = 0.05  # lattice velocity  (keep < 0.1 for stability)
-LBM_RE        = 500.0 # Reynolds number
-LBM_N_STEPS   = 3000  # default timesteps
+# LBM solver
+LBM_GRID_RES  = 4.0   # metres per cell
+LBM_U_LATTICE = 0.05  # lattice velocity (keep < 0.1 for stability)
+LBM_RE        = 500.0
+LBM_N_STEPS   = 3000
 
-# ── Streamlines ───────────────────────────────────────────────────────
-STREAMLINE_DT        = 1.0    # base integration step (m)
+# Streamlines
+STREAMLINE_DT        = 1.0    # max integration step (m)
 STREAMLINE_MAX_STEPS = 800
-STREAMLINE_MIN_SPEED = 0.3    # m/s — stop tracing below this
-STREAMLINE_MIN_LEN   = 15.0   # m — discard shorter streamlines
+STREAMLINE_MIN_SPEED = 0.3    # m/s
+STREAMLINE_MIN_LEN   = 15.0   # m
 
 N_SEEDS_INLET    = 120
 N_SEEDS_BUILDING = 200
@@ -101,37 +92,39 @@ N_SEEDS_STREET   = 300
 OPACITY_MIN_SPEED = 0.5
 OPACITY_MAX_SPEED = 12.0
 
-# ── Drone energy model ────────────────────────────────────────────────
+# Drone energy model
 DRONE_MASS        = 5.0   # kg
 DRONE_CRUISE_SPEED= 12.0  # m/s
 DRONE_DISC_AREA   = 0.5   # m²
 DRONE_FRONTAL_AREA= 0.1   # m²
 DRONE_CD          = 0.5
 
-# ── Routing ───────────────────────────────────────────────────────────
-ROUTING_GRID_RES    = 6.0   # metres (coarser than voxel for speed)
-WIND_COST_ALPHA     = 0.35  # headwind penalty
-WIND_COST_BETA      = 0.15  # turbulence penalty
+# Routing
+ROUTING_GRID_RES    = 3.0   # metres horizontal
+ROUTING_GRID_RES_Z  = 3.0   # metres vertical
+MIN_ROUTE_CLEARANCE = 5.0   # minimum SDF distance from buildings (m)
+WIND_COST_ALPHA     = 0.35  # headwind penalty weight
+WIND_COST_BETA      = 0.15  # turbulence penalty weight
 NUM_ROUTE_WAYPOINTS = 60
 
 CUOPT_ENDPOINT  = "https://optimize.api.nvidia.com/v1/nvidia/cuopt"
-CUOPT_TIME_LIMIT= 5
+CUOPT_TIME_LIMIT= 30
 
-# ── Nemotron ──────────────────────────────────────────────────────────
+# Nemotron
 NEMOTRON_TARGET    = 3
 NEMOTRON_THRESHOLD = 0.7
 
-# ── Server ────────────────────────────────────────────────────────────
+# Server
 SERVER_HOST = "0.0.0.0"
 SERVER_PORT = 8080
 
-# ── Paths ──────────────────────────────────────────────────────────────
-_BASE        = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR     = os.path.join(_BASE, "data")
-DOMAIN_DIR   = os.path.join(DATA_DIR, "domain")
-ROUTES_DIR   = os.path.join(DATA_DIR, "routes")
+# Paths
+_BASE          = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR       = os.path.join(_BASE, "data")
+DOMAIN_DIR     = os.path.join(DATA_DIR, "domain")
+ROUTES_DIR     = os.path.join(DATA_DIR, "routes")
 STREAMLINE_DIR = os.path.join(DATA_DIR, "streamlines")
-CACHE_DIR    = os.path.join(DATA_DIR, "cache")
+CACHE_DIR      = os.path.join(DATA_DIR, "cache")
 
 
 def _ensure_dirs():
@@ -140,7 +133,6 @@ def _ensure_dirs():
 
 
 def domain_cache_key():
-    """Short hash of current domain bounds — used to key the geometry cache."""
     k = f"{DOMAIN_CENTER_LAT:.5f}_{DOMAIN_CENTER_LON:.5f}_{DOMAIN_HALF_X:.0f}_{DOMAIN_HALF_Y:.0f}"
     return hashlib.md5(k.encode()).hexdigest()[:10]
 
@@ -157,7 +149,6 @@ def has_cached_geometry():
             os.path.exists(os.path.join(d, "meta.json")))
 
 
-# local ↔ geo helpers (use snapshot values, not live globals, for thread safety)
 def local_to_lonlat(x, y, dom=None):
     if dom is None:
         clat, clon = DOMAIN_CENTER_LAT, DOMAIN_CENTER_LON

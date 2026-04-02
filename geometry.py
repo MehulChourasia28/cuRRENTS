@@ -1,27 +1,11 @@
-"""Building geometry — voxelise from CesiumJS heightmap or from OSM."""
 import os
 import json
-import math
 import numpy as np
 
 import config
 
-# ── Heightmap → 3-D occupancy ─────────────────────────────────────────
 
 def voxelize_from_heightmap(height_grid, sample_res, domain):
-    """Convert a 2-D ellipsoidal-height grid into a 3-D occupancy grid.
-
-    Parameters
-    ----------
-    height_grid : ndarray (ny_s, nx_s)  ellipsoidal heights from Cesium
-    sample_res  : float   grid spacing in metres
-    domain      : dict    config snapshot (half_x, half_y, height, …)
-
-    Returns
-    -------
-    occupancy : float32 (nx, ny, nz)   1 = solid, 0 = air
-    ground_h  : float                  median ground ellipsoidal height
-    """
     from scipy.ndimage import uniform_filter, distance_transform_edt
     from scipy.interpolate import RegularGridInterpolator
 
@@ -32,22 +16,20 @@ def voxelize_from_heightmap(height_grid, sample_res, domain):
 
     print(f"  Heightmap {nx_s}×{ny_s} @ {sample_res} m")
 
-    hmap = height_grid.copy().astype(np.float64)
+    hmap = height_grid.copy().astype(float)
 
-    # Fill NaN with nearest-neighbour
     bad = ~np.isfinite(hmap)
     if bad.any():
         _, idx = distance_transform_edt(bad, return_indices=True)
         hmap[bad] = hmap[tuple(idx[:, bad])]
         print(f"  Filled {bad.sum()} NaN samples")
 
-    # Ground = low-percentile smoothed surface (avoids rooftops pulling it up)
+    # Ground = low-percentile smoothed surface so rooftops don't pull it up
     ground_lo = float(np.nanpercentile(hmap, 8))
     ground    = np.clip(uniform_filter(hmap, size=max(nx_s, ny_s) // 4),
                         ground_lo - 3, ground_lo + 3)
     above = np.clip(hmap - ground, 0, height)
 
-    # Upsample to voxel grid
     res = config.VOXEL_RESOLUTION
     nx  = max(2, int(2 * half_x / res))
     ny  = max(2, int(2 * half_y / res))
@@ -79,10 +61,7 @@ def voxelize_from_heightmap(height_grid, sample_res, domain):
     return occupancy, ground_lo
 
 
-# ── Cache I/O ──────────────────────────────────────────────────────────
-
 def save_geometry(occupancy, domain, ground_h):
-    """Save geometry to domain-keyed cache and legacy domain dir."""
     config._ensure_dirs()
     meta = {
         "domain": domain,
@@ -93,18 +72,16 @@ def save_geometry(occupancy, domain, ground_h):
     np.save(os.path.join(cache, "occupancy.npy"), occupancy)
     with open(os.path.join(cache, "meta.json"), "w") as f:
         json.dump(meta, f)
-    # Also write to legacy domain dir so LBM subprocess can find it
+    # Also write to domain dir so the LBM subprocess can find it
     np.save(os.path.join(config.DOMAIN_DIR, "occupancy.npy"), occupancy)
     print(f"  Geometry cached → {cache}")
 
 
 def load_cached_geometry():
-    """Load from domain-keyed cache.  Returns (occupancy, meta)."""
     cache = config.domain_cache_dir()
     occ   = np.load(os.path.join(cache, "occupancy.npy"))
     with open(os.path.join(cache, "meta.json")) as f:
         meta = json.load(f)
-    # Refresh legacy path
     config._ensure_dirs()
     np.save(os.path.join(config.DOMAIN_DIR, "occupancy.npy"), occ)
     return occ, meta

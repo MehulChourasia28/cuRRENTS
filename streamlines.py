@@ -1,20 +1,3 @@
-"""
-Streamline tracer for the averaged LBM velocity field.
-
-Key fixes vs. old code
------------------------
-* No module-level cached config constants — all domain params read from
-  the ``domain`` dict passed at call time (no stale-import bugs).
-* Simpler, more robust RK4 tracer with explicit domain bounds checks.
-* Building collision uses the same coordinate mapping as voxelization.
-* Seeds are evenly distributed; fewer but more reliable streamlines.
-
-Public API
-----------
-    run(occupancy, coords, vel, shape, domain)
-        → saves  data/streamlines/streamlines_combined.json
-                 data/streamlines/metadata.json
-"""
 import os
 import json
 import math
@@ -24,8 +7,6 @@ from scipy.ndimage import binary_dilation, distance_transform_edt
 
 import config
 
-
-# ── Colour map ────────────────────────────────────────────────────────
 
 def _turbo(t):
     try:
@@ -38,14 +19,7 @@ def _turbo(t):
         return np.stack([r, g, b], -1)
 
 
-# ── Velocity interpolators ────────────────────────────────────────────
-
 def _build_interps(coords, vel, shape, occupancy, domain):
-    """Build tri-linear velocity interpolators.
-
-    Velocities inside buildings (+ dilated buffer) are zeroed before
-    building the interpolator so streamlines naturally stop at walls.
-    """
     nx, ny, nz = shape
     half_x = domain["half_x"]
     half_y = domain["half_y"]
@@ -58,7 +32,7 @@ def _build_interps(coords, vel, shape, occupancy, domain):
 
     v = vel.copy()
 
-    # Zero velocity inside buildings (with dilation margin)
+    # Zero velocity inside buildings so streamlines naturally deflect away
     blocked = binary_dilation(occupancy > 0.5,
                               iterations=config.BUILDING_H_DILATE).astype(bool)
     ix = np.clip(((coords[:, 0] + half_x) / res).astype(int), 0, blocked.shape[0]-1)
@@ -77,7 +51,6 @@ def _build_interps(coords, vel, shape, occupancy, domain):
 
 
 def _build_sdf(occupancy, domain):
-    """Signed distance field (positive = air, negative = inside building)."""
     res    = config.VOXEL_RESOLUTION
     half_x = domain["half_x"]
     half_y = domain["half_y"]
@@ -92,8 +65,6 @@ def _build_sdf(occupancy, domain):
                                    bounds_error=False, fill_value=50.0)
 
 
-# ── Integration helpers ────────────────────────────────────────────────
-
 def _vel_at(interps, p):
     pt = p.reshape(1, -1)
     return np.array([f(pt).item() for f in interps])
@@ -104,9 +75,6 @@ def _sdf_at(sdf_interp, p):
 
 
 def _rk4_step(interps, p, dt, occupancy=None, domain=None):
-    """RK4 with building-aware velocity: any intermediate position inside a
-    building returns zero velocity, which deflects the trace away from walls
-    rather than letting it tunnel through."""
     def _v(pt):
         if occupancy is not None and _inside_building(pt, occupancy, domain):
             return np.zeros(3)
@@ -122,8 +90,7 @@ def _in_bounds(p, domain):
     hx = domain["half_x"]
     hy = domain["half_y"]
     ht = domain["height"]
-    return (abs(p[0]) <= hx and abs(p[1]) <= hy
-            and 0 <= p[2] <= ht)
+    return (abs(p[0]) <= hx and abs(p[1]) <= hy and 0 <= p[2] <= ht)
 
 
 def _inside_building(p, occupancy, domain):
@@ -139,19 +106,13 @@ def _inside_building(p, occupancy, domain):
     return False
 
 
-# ── Single streamline ─────────────────────────────────────────────────
-
 def _trace(interps, sdf_interp, start, occupancy, domain):
     pos    = start.copy()
     path   = [pos.copy()]
     speeds = [np.linalg.norm(_vel_at(interps, pos))]
     stall  = 0
 
-    # STREAMLINE_DT is a max DISTANCE in metres (not a time step).
-    # dt in seconds = distance / speed, so the physical step is always
-    # bounded to at most STREAMLINE_DT metres regardless of wind speed.
-    # This prevents tunnelling through buildings smaller than the step size.
-    _MAX_STEP_M = config.STREAMLINE_DT  # metres
+    _MAX_STEP_M = config.STREAMLINE_DT
 
     for _ in range(config.STREAMLINE_MAX_STEPS):
         v   = _vel_at(interps, pos)
@@ -160,14 +121,10 @@ def _trace(interps, sdf_interp, start, occupancy, domain):
             break
 
         sdf_val = _sdf_at(sdf_interp, pos)
-
-        # Stop (not just slow) when within 0.5 m of a building surface
-        if sdf_val < 0.5:
+        if sdf_val < config.VOXEL_RESOLUTION:
             break
 
-        # Max physical step = min(STREAMLINE_DT, 25% of SDF distance)
-        # → streamline can never jump more than one quarter of the way
-        #   to the nearest wall in a single step
+        # Limit step to 25% of SDF distance so we never jump through thin walls
         step_m = min(_MAX_STEP_M, max(0.1, sdf_val * 0.25))
         dt     = step_m / (spd + 1e-6)
 
@@ -176,7 +133,6 @@ def _trace(interps, sdf_interp, start, occupancy, domain):
         if not _in_bounds(npos, domain):
             break
         if _inside_building(npos, occupancy, domain) or _sdf_at(sdf_interp, npos) < 0.0:
-            # Try a shorter step; if still inside, give up
             npos_half = _rk4_step(interps, pos, dt * 0.25, occupancy, domain)
             if _inside_building(npos_half, occupancy, domain):
                 stall += 1
@@ -185,6 +141,9 @@ def _trace(interps, sdf_interp, start, occupancy, domain):
                 continue
             npos = npos_half
 
+        if _sdf_at(sdf_interp, npos) < config.VOXEL_RESOLUTION:
+            break
+
         stall = 0
         pos   = npos
         path.append(pos.copy())
@@ -192,8 +151,6 @@ def _trace(interps, sdf_interp, start, occupancy, domain):
 
     return np.asarray(path), np.asarray(speeds)
 
-
-# ── Seed placement ────────────────────────────────────────────────────
 
 def _make_seeds(occupancy, domain, wind_deg):
     rng    = np.random.RandomState(42)
@@ -208,7 +165,7 @@ def _make_seeds(occupancy, domain, wind_deg):
     def _free(p):
         return not _inside_building(p, occupancy, domain)
 
-    # 1. Inlet face seeds
+    # Inlet face
     n_in = config.N_SEEDS_INLET
     if abs(ca) >= abs(sa):
         x0 = -math.copysign(half_x * 0.97, ca)
@@ -233,9 +190,7 @@ def _make_seeds(occupancy, domain, wind_deg):
             if _free(p):
                 seeds.append(p)
 
-    # 2. Uniform grid seeds — fill far-field / wake coverage gaps
-    # Place seeds on a regular grid at street level and mid-altitude so the
-    # downwind half of the domain (which inlet seeds rarely reach) is covered.
+    # Uniform grid to cover the downwind half / wake gaps
     grid_step = max(half_x, half_y) / 8.0
     for gx in np.arange(-half_x * 0.85, half_x * 0.85, grid_step):
         for gy in np.arange(-half_y * 0.85, half_y * 0.85, grid_step):
@@ -246,7 +201,7 @@ def _make_seeds(occupancy, domain, wind_deg):
                 if _in_bounds(p, domain) and _free(p):
                     seeds.append(p)
 
-    # 3. Building-surface seeds (just outside walls)
+    # Just outside building surfaces
     surface = binary_dilation(occupancy > 0.5) & (occupancy < 0.5)
     pts = np.argwhere(surface).astype(np.float64)
     if len(pts):
@@ -258,13 +213,13 @@ def _make_seeds(occupancy, domain, wind_deg):
                                 replace=False)]
         for pt in chosen:
             off = rng.randn(3) * 2.5
-            off[2] = abs(off[2])  # stay above ground
+            off[2] = abs(off[2])
             s = pt + off
             s[2] = max(1.0, s[2])
             if _in_bounds(s, domain) and _free(s):
                 seeds.append(s)
 
-    # 4. Street-level random seeds (dense low-altitude coverage)
+    # Street-level random
     for _ in range(config.N_SEEDS_STREET):
         x = rng.uniform(-half_x * 0.85, half_x * 0.85)
         y = rng.uniform(-half_y * 0.85, half_y * 0.85)
@@ -276,8 +231,6 @@ def _make_seeds(occupancy, domain, wind_deg):
     return seeds
 
 
-# ── Convert to CesiumJS JSON ──────────────────────────────────────────
-
 def _to_cesium(streamlines, domain):
     if not streamlines:
         return {"streamlines": [], "speed_range": [0, 1]}
@@ -287,8 +240,8 @@ def _to_cesium(streamlines, domain):
     smax    = float(np.percentile(all_spd, 95))
     srange  = max(smax - smin, 0.1)
 
-    geh  = domain.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
-    out  = []
+    geh = domain.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
+    out = []
 
     for sl in streamlines:
         pos  = sl["positions"]
@@ -313,22 +266,9 @@ def _to_cesium(streamlines, domain):
     return {"streamlines": out, "speed_range": [smin, smax]}
 
 
-# ── Public entry point ─────────────────────────────────────────────────
-
 def run(occupancy, coords, vel, shape, domain):
-    """Compute streamlines from averaged velocity field and save JSON.
-
-    Parameters
-    ----------
-    occupancy : (nx_occ, ny_occ, nz_occ) float32
-    coords    : (N, 3) float32  — LBM cell centres in local metres
-    vel       : (N, 3) float32  — physical m/s
-    shape     : (nx, ny, nz)    — LBM inner grid shape
-    domain    : dict            — config.snapshot()
-    """
     print("\n── Streamline computation ──")
 
-    # Dominant wind direction from mean velocity
     mean_v   = vel.mean(axis=0)
     wind_deg = math.degrees(math.atan2(mean_v[1], mean_v[0])) % 360
     print(f"    Dominant direction: {wind_deg:.0f}°  "
@@ -339,7 +279,6 @@ def run(occupancy, coords, vel, shape, domain):
     seeds      = _make_seeds(occupancy, domain, wind_deg)
     print(f"    {len(seeds)} seed points")
 
-    # Save seed positions for the frontend layer toggle
     geh = domain.get("ground_ellipsoid_height", config.GROUND_ELLIPSOID_HEIGHT)
     seed_geo = []
     for s in seeds:
@@ -363,7 +302,6 @@ def run(occupancy, coords, vel, shape, domain):
         if length < config.STREAMLINE_MIN_LEN:
             n_short += 1
             continue
-        # Reject recirculating loops (displacement/length ratio too small)
         disp = float(np.linalg.norm(path[-1] - path[0]))
         if disp / length < 0.12:
             n_loop += 1
@@ -383,10 +321,10 @@ def run(occupancy, coords, vel, shape, domain):
         json.dump(data, f)
 
     meta = {
-        "type": "combined",
+        "type":          "combined",
         "n_streamlines": len(results),
-        "wind_deg": round(wind_deg, 1),
-        "domain": domain,
+        "wind_deg":      round(wind_deg, 1),
+        "domain":        domain,
     }
     with open(meta_path, "w") as f:
         json.dump(meta, f)

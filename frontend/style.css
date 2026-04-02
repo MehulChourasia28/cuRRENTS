@@ -373,6 +373,3 @@ select#preset-route:focus { border-color: var(--nv-green); }
   color: var(--nv-green);
 }
 
-/* ── Custom fields toggle ── */
-/* .custom-fields visibility controlled via .hidden class */
-.custom-fields { margin-top:6px; }

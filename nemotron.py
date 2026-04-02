@@ -14,7 +14,7 @@ import logging
 import math
 import os
 import re
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -23,7 +23,7 @@ from tenacity import (
 )
 
 import config
-from wind_data import WindProfile, log_wind_profile, SURFACE_ROUGHNESS_Z0
+from wind_data import WindProfile
 
 log = logging.getLogger(__name__)
 
@@ -41,8 +41,6 @@ REWARD_MIDPOINT = -24.0
 REWARD_SCALE = 2.0
 
 
-# ── Data ────────────────────────────────────────────────────────────
-
 @dataclass
 class WindScenario:
     u_ref: float            # speed at 50 m (m/s)
@@ -51,8 +49,6 @@ class WindScenario:
     correctness: float
     justification: str
 
-
-# ── NIM client ──────────────────────────────────────────────────────
 
 class _RateLimitError(Exception):
     pass
@@ -82,8 +78,6 @@ class _NIMClient:
     async def close(self) -> None:
         await self._c.close()
 
-
-# ── JSON parsing / repair ───────────────────────────────────────────
 
 _JSON_ARRAY_RE = re.compile(r"\[.*\]", re.DOTALL)
 
@@ -126,8 +120,6 @@ def _parse_scenarios(raw: str) -> list[dict]:
     return [{"u_ref": float(u), "direction_offset": float(d),
              "justification": j} for u, d, j in matches]
 
-
-# ── Generation ──────────────────────────────────────────────────────
 
 _GEN_PROMPT = """\
 You are an urban wind-engineering expert creating synthetic CFD boundary \
@@ -186,8 +178,6 @@ async def _generate_batch(client: _NIMClient,
         await asyncio.sleep(RETRY_BASE_DELAY * (2 ** attempt))
     return []
 
-
-# ── Reward scoring ──────────────────────────────────────────────────
 
 def _parse_reward(raw: str) -> Optional[float]:
     raw = raw.strip().lower()
@@ -252,8 +242,6 @@ async def _score_batch(client: _NIMClient, profile: WindProfile,
     results = await asyncio.gather(*tasks)
     return [r for r in results if r is not None]
 
-
-# ── Public entry point ──────────────────────────────────────────────
 
 async def generate_variations(profile: WindProfile) -> list[WindScenario]:
     """Generate and validate wind variations until NEMOTRON_TARGET pass."""

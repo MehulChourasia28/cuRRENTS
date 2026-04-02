@@ -2,12 +2,11 @@
 """
 Urban Wind Visualisation — pipeline orchestrator.
 
-Usage
------
-    python run_pipeline.py                   # full pipeline
-    python run_pipeline.py --skip-nemotron   # skip Nemotron; use 2 fallback angles
-    python run_pipeline.py --serve-only      # web server only
-    python run_pipeline.py --lbm-steps N    # override timestep count
+Usage:
+    python run_pipeline.py                  # full pipeline
+    python run_pipeline.py --skip-nemotron  # skip Nemotron, use 2 fallback angles
+    python run_pipeline.py --serve-only     # web server only
+    python run_pipeline.py --lbm-steps N   # override timestep count
 """
 import argparse
 import asyncio
@@ -29,27 +28,18 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Pipeline
-# ══════════════════════════════════════════════════════════════════════
-
 def _run_pipeline(args):
-    """Execute one full pipeline run for the currently-set domain."""
-
-    # Take a snapshot so the domain doesn't shift mid-run
     dom = config.snapshot()
     log.info("Domain: center (%.5f, %.5f)  extent %.0f×%.0f m",
              dom["center_lat"], dom["center_lon"],
              dom["half_x"]*2, dom["half_y"]*2)
 
-    # ── 1. Geometry ──────────────────────────────────────────────
     import geometry
     server.set_status("geometry", "Loading geometry …")
 
     if config.has_cached_geometry():
         log.info("Cache HIT — loading geometry")
         occ, meta = geometry.load_cached_geometry()
-        # Restore ground height from cache
         gh = meta.get("ground_ellipsoid_height")
         if gh is not None:
             config.GROUND_ELLIPSOID_HEIGHT = gh
@@ -61,27 +51,21 @@ def _run_pipeline(args):
         occ = np.load(os.path.join(config.DOMAIN_DIR, "occupancy.npy"))
         dom["ground_ellipsoid_height"] = config.GROUND_ELLIPSOID_HEIGHT
 
-    pct = occ.mean() * 100
-    log.info("Occupancy grid %s  %.1f%% covered", occ.shape, pct)
+    log.info("Occupancy grid %s  %.1f%% covered", occ.shape, occ.mean() * 100)
 
-    # ── 2. Wind data ─────────────────────────────────────────────
-    log.info("STEP 2 — Fetch wind data")
     server.set_status("wind", "Fetching wind data …")
-
     from wind_data import fetch_wind_profile
     try:
         profile = asyncio.run(fetch_wind_profile(
             dom["center_lat"], dom["center_lon"],
             dom["half_x"], dom["half_y"]))
         base_speed = profile.speed_at_height.get(50.0, config.LBM_U_LATTICE * 100)
-        log.info("Wind: %.1f m/s @ 50 m  dir=%.0f°",
-                 base_speed, profile.direction_deg)
+        log.info("Wind: %.1f m/s @ 50 m  dir=%.0f°", base_speed, profile.direction_deg)
     except Exception as exc:
         log.warning("Wind fetch failed (%s) — using 8 m/s fallback", exc)
         base_speed = 8.0
         profile    = None
 
-    # ── 3. Nemotron scenarios ────────────────────────────────────
     scenarios = None
     if not args.skip_nemotron and config.NIM_API_KEY and profile is not None:
         log.info("STEP 3 — Nemotron scenario generation")
@@ -105,11 +89,10 @@ def _run_pipeline(args):
         scenarios = [_Sc(base_speed, 0.0), _Sc(base_speed, 90.0)]
         log.info("Using 2 fallback scenarios (0° and 90°)")
 
-    # ── 4. LBM solves ────────────────────────────────────────────
     log.info("STEP 4 — LBM solves (%d scenarios)", len(scenarios))
     import lbm
 
-    lbm_cache: dict = {}  # (angle, speed) → (coords, vel, shape) | "failed"
+    lbm_cache: dict = {}
     all_vel:   list = []
     coords_m = shape = None
     n_steps  = args.lbm_steps or config.LBM_N_STEPS
@@ -124,8 +107,7 @@ def _run_pipeline(args):
             return result
         log.info("    %s", label)
         try:
-            result = lbm.solve_wind(occ, angle, speed,
-                                    domain=dom, num_steps=n_steps)
+            result = lbm.solve_wind(occ, angle, speed, domain=dom, num_steps=n_steps)
             lbm_cache[key] = result
             return result
         except Exception as exc:
@@ -174,7 +156,6 @@ def _run_pipeline(args):
     avg_vel = np.mean(all_vel, axis=0).astype(np.float32)
     log.info("Averaged %d velocity fields → shape %s", len(all_vel), avg_vel.shape)
 
-    # ── 5. Streamlines ───────────────────────────────────────────
     log.info("STEP 5 — Streamlines")
     server.set_status("streamlines", "Computing streamlines …")
     import streamlines
@@ -182,16 +163,15 @@ def _run_pipeline(args):
     if n_sl == 0:
         log.warning("No streamlines generated")
 
-    # ── 6. Route optimisation ────────────────────────────────────
     log.info("STEP 6 — Route optimisation")
     server.set_status("routing", "Computing drone routes …")
 
     lon_per_m = 1.0 / (111_320.0 * math.cos(math.radians(dom["center_lat"])))
     lat_per_m = 1.0 / 111_320.0
-    ox = (dom["origin_lon"]  - dom["center_lon"]) / lon_per_m
-    oy = (dom["origin_lat"]  - dom["center_lat"]) / lat_per_m
-    dx = (dom["dest_lon"]    - dom["center_lon"]) / lon_per_m
-    dy = (dom["dest_lat"]    - dom["center_lat"]) / lat_per_m
+    ox = (dom["origin_lon"] - dom["center_lon"]) / lon_per_m
+    oy = (dom["origin_lat"] - dom["center_lat"]) / lat_per_m
+    dx = (dom["dest_lon"]   - dom["center_lon"]) / lon_per_m
+    dy = (dom["dest_lat"]   - dom["center_lat"]) / lat_per_m
     origin_local = np.array([ox, oy, dom["origin_height"]])
     dest_local   = np.array([dx, dy, dom["dest_height"]])
 
@@ -213,10 +193,6 @@ def _run_pipeline(args):
     log.info("Pipeline complete  http://localhost:%d", config.SERVER_PORT)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Main loop
-# ══════════════════════════════════════════════════════════════════════
-
 def main():
     parser = argparse.ArgumentParser(description="Urban Wind Viz pipeline")
     parser.add_argument("--skip-nemotron", action="store_true")
@@ -234,8 +210,7 @@ def main():
     t.start()
 
     while True:
-        log.info("Waiting for route request  http://localhost:%d",
-                 config.SERVER_PORT)
+        log.info("Waiting for route request  http://localhost:%d", config.SERVER_PORT)
         server.wait_for_coords()
 
         try:
