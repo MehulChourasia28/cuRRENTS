@@ -92,6 +92,12 @@ class _NavGraph:
                             self._ys[free_ijk[:,1]],
                             self._zs[free_ijk[:,2]]], axis=1)
 
+        # Pre-compute global max wind speed for consistent normalisation
+        wind_at_free = np.zeros_like(pos_arr)
+        for c in range(3):
+            wind_at_free[:,c] = self._vel_interps[c](pos_arr).ravel()
+        global_max_ws = max(float(np.linalg.norm(wind_at_free, axis=1).max()), 1.0)
+
         all_r, all_c, all_d, all_w = [], [], [], []
         for off in np.array(self._NEIGHBOURS, dtype=np.int32):
             nb    = free_ijk + off
@@ -123,16 +129,16 @@ class _NavGraph:
             dn        = np.clip(dist, 1e-8, None)
             direction = diff / dn[:,None]
             headwind  = -np.sum(wind * direction, axis=1)
-            w_spd     = np.linalg.norm(wind, axis=1)
-            max_ws    = max(float(w_spd.max()), 1.0)
+            crosswind = np.sqrt(np.clip(
+                np.sum(wind**2, axis=1) - headwind**2, 0, None))
 
-            hw_pen    = np.clip(headwind,  0, None) / max_ws
-            sp_pen    = w_spd / max_ws
-            tw_bonus  = np.clip(-headwind, 0, None) / max_ws * 0.25
+            hw_pen    = np.clip(headwind,  0, None) / global_max_ws  # [0,1] drag / energy
+            cw_pen    = crosswind / global_max_ws                    # [0,1] destabilisation
+            tw_bonus  = np.clip(-headwind, 0, None) / global_max_ws * 0.25
             wind_cost = dist * np.clip(
-                1.0 + config.WIND_COST_ALPHA * hw_pen
-                    + config.WIND_COST_BETA  * sp_pen
-                    - tw_bonus, 0.1, None)
+                1.0 + config.WIND_COST_ALPHA * hw_pen   # penalise flying into wind
+                    + config.WIND_COST_BETA  * cw_pen   # penalise lateral destabilisation
+                    - tw_bonus, 0.1, None)               # reward tailwind
 
             all_r.append(src);  all_c.append(dst)
             all_d.append(dist); all_w.append(wind_cost)
@@ -458,36 +464,57 @@ def _smooth_path(path, graph, domain):
     if len(kp) < 2:
         return path
 
-    # ── Step 2: Catmull-Rom spline on the reduced keypoints ─────────────────
-    # Phantom endpoints so the spline reaches the first and last keypoints
+    # ── Step 2: Centripetal Catmull-Rom spline on the reduced keypoints ────
+    # Centripetal parameterisation (alpha=0.5) is mathematically guaranteed
+    # to never produce cusps or self-intersections, unlike uniform Catmull-Rom.
     phantom_s = kp[0] + (kp[0] - kp[1])
     phantom_e = kp[-1] + (kp[-1] - kp[-2])
     ctrl = np.vstack([phantom_s, kp, phantom_e])
 
-    spacing  = graph.res * 0.5   # target output point spacing (m)
+    def _knot(pi, pj, t_prev):
+        return t_prev + float(np.linalg.norm(pj - pi)) ** 0.5  # alpha = 0.5
+
+    spacing  = graph.res * 0.5
     smoothed = [kp[0]]
 
     for i in range(1, len(ctrl) - 2):
         p0, p1, p2, p3 = ctrl[i - 1], ctrl[i], ctrl[i + 1], ctrl[i + 2]
+
+        # Centripetal knot sequence for this span
+        t0 = 0.0
+        t1 = _knot(p0, p1, t0)
+        t2 = _knot(p1, p2, t1)
+        t3 = _knot(p2, p3, t2)
+
+        if abs(t2 - t1) < 1e-8:   # degenerate segment — keypoints are identical
+            continue
+
         seg_len = float(np.linalg.norm(p2 - p1))
         n_seg   = max(2, int(seg_len / spacing))
 
         for k in range(1, n_seg + 1):
-            t  = k / n_seg
-            t2 = t * t
-            t3 = t2 * t
-            pt = 0.5 * (
-                2 * p1
-                + (-p0 + p2)                  * t
-                + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2
-                + (-p0 + 3 * p1 - 3 * p2 + p3)    * t3
-            )
-            # If the spline curves too close to a building, fall back to linear
+            t = t1 + (t2 - t1) * k / n_seg   # uniform steps in knot space
+
+            # Barry-Goldman centripetal Catmull-Rom evaluation
+            def _lerp(a, b, ta, tb):
+                if abs(tb - ta) < 1e-8:
+                    return a
+                return a + (b - a) * (t - ta) / (tb - ta)
+
+            a1 = _lerp(p0, p1, t0, t1)
+            a2 = _lerp(p1, p2, t1, t2)
+            a3 = _lerp(p2, p3, t2, t3)
+            b1 = _lerp(a1, a2, t0, t2)
+            b2 = _lerp(a2, a3, t1, t3)
+            pt = _lerp(b1, b2, t1, t2)
+
+            # Fall back to linear if spline curves too close to a building
             if sdf_interp(pt.reshape(1, -1)).item() < min_clearance:
-                pt = p1 + t * (p2 - p1)
+                u  = (k / n_seg)
+                pt = p1 + u * (p2 - p1)
             smoothed.append(pt)
 
-    result    = np.array(smoothed)
+    result     = np.array(smoothed)
     result[0]  = path[0]
     result[-1] = path[-1]
     return result
@@ -524,16 +551,15 @@ def compute_routes(occupancy, vel, shape, origin_local, dest_local, domain):
         w_energy = None
         wp       = None
 
-    if config.NIM_API_KEY:
-        log.info("cuOpt route …")
-        cp = _cuopt_route(graph, s_ijk, g_ijk)
-        if cp is not None:
-            cp[0] = origin_local;  cp[-1] = dest_local
-            cp       = _smooth_path(cp, graph, domain)
-            c_energy = _energy(cp, graph)
-            if w_energy is None or c_energy["energy_wh"] < w_energy["energy_wh"]:
-                wp, w_energy = cp, c_energy
-                log.info("  Using cuOpt route (lower energy)")
+    log.info("cuOpt route …")
+    cp = _cuopt_route(graph, s_ijk, g_ijk)
+    if cp is not None:
+        cp[0] = origin_local;  cp[-1] = dest_local
+        cp       = _smooth_path(cp, graph, domain)
+        c_energy = _energy(cp, graph)
+        if w_energy is None or c_energy["energy_wh"] < w_energy["energy_wh"]:
+            wp, w_energy = cp, c_energy
+            log.info("  Using cuOpt route (lower energy)")
 
     if wp is None or w_energy is None:
         wp       = dp if dp is not None else np.array([origin_local, dest_local])

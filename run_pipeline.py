@@ -54,17 +54,31 @@ def _run_pipeline(args):
     log.info("Occupancy grid %s  %.1f%% covered", occ.shape, occ.mean() * 100)
 
     server.set_status("wind", "Fetching wind data …")
-    from wind_data import fetch_wind_profile
-    try:
-        profile = asyncio.run(fetch_wind_profile(
-            dom["center_lat"], dom["center_lon"],
-            dom["half_x"], dom["half_y"]))
-        base_speed = profile.speed_at_height.get(50.0, config.LBM_U_LATTICE * 100)
-        log.info("Wind: %.1f m/s @ 50 m  dir=%.0f°", base_speed, profile.direction_deg)
-    except Exception as exc:
-        log.warning("Wind fetch failed (%s) — using 8 m/s fallback", exc)
-        base_speed = 8.0
-        profile    = None
+    from wind_data import fetch_wind_profile, log_wind_profile, WindProfile, PROFILE_HEIGHTS
+    wind_ov = dom.get("wind_override")
+    if wind_ov:
+        speed_10m = float(wind_ov["speed_ms"])
+        dir_deg   = float(wind_ov["direction_deg"])
+        profile   = WindProfile(direction_deg=dir_deg,
+                                center_lat=dom["center_lat"],
+                                center_lon=dom["center_lon"],
+                                num_samples=0)
+        for z in PROFILE_HEIGHTS:
+            profile.speed_at_height[z] = round(log_wind_profile(speed_10m, z), 2)
+        base_speed = profile.speed_at_height.get(50.0, speed_10m)
+        log.info("Wind override: %.2f m/s @ 10 m  dir=%.0f°  → %.1f m/s @ 50 m",
+                 speed_10m, dir_deg, base_speed)
+    else:
+        try:
+            profile = asyncio.run(fetch_wind_profile(
+                dom["center_lat"], dom["center_lon"],
+                dom["half_x"], dom["half_y"]))
+            base_speed = profile.speed_at_height.get(50.0, config.LBM_U_LATTICE * 100)
+            log.info("Wind: %.1f m/s @ 50 m  dir=%.0f°", base_speed, profile.direction_deg)
+        except Exception as exc:
+            log.warning("Wind fetch failed (%s) — using 8 m/s fallback", exc)
+            base_speed = 8.0
+            profile    = None
 
     scenarios = None
     if not args.skip_nemotron and config.NIM_API_KEY and profile is not None:

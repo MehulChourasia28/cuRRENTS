@@ -106,6 +106,110 @@ def _inside_building(p, occupancy, domain):
     return False
 
 
+def _trace_batch(interps, sdf_interp, seeds, occupancy, domain, max_steps):
+    """
+    Trace all seeds simultaneously, batching every interpolator call across
+    the full set of active streamlines.  Much faster than N serial _trace()
+    calls because RegularGridInterpolator is far more efficient on (N,3)
+    arrays than N separate (1,3) calls.
+    """
+
+    def _vel_b(pts):   # (M,3) → (M,3)
+        return np.column_stack([f(pts) for f in interps])
+
+    def _sdf_b(pts):   # (M,3) → (M,)
+        return sdf_interp(pts).ravel()
+
+    def _rk4_b(pts, dt):   # pts (M,3), dt (M,) → (M,3)
+        # Velocity is already zeroed inside buildings by _build_interps,
+        # so no extra _inside_building check is needed inside the RK4 stages.
+        k1 = _vel_b(pts)
+        k2 = _vel_b(pts + 0.5 * dt[:, None] * k1)
+        k3 = _vel_b(pts + 0.5 * dt[:, None] * k2)
+        k4 = _vel_b(pts +       dt[:, None] * k3)
+        return pts + (dt[:, None] / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+    # Filter seeds that start inside a building
+    seeds = [s for s in seeds if not _inside_building(s, occupancy, domain)]
+    N = len(seeds)
+    if N == 0:
+        return []
+
+    hx, hy, ht  = domain["half_x"], domain["half_y"], domain["height"]
+    _MAX_STEP   = config.STREAMLINE_DT
+    _SDF_MARGIN = 2 * config.VOXEL_RESOLUTION
+
+    pos    = np.array(seeds, dtype=np.float64)   # (N,3) current positions
+    alive  = np.ones(N,  dtype=bool)
+    stalls = np.zeros(N, dtype=int)
+    paths  = [[pos[i].copy()] for i in range(N)]
+    init_v = _vel_b(pos)
+    spd_lists = [[float(np.linalg.norm(init_v[i]))] for i in range(N)]
+
+    for _ in range(max_steps):
+        if not alive.any():
+            break
+
+        ai   = np.where(alive)[0]        # active global indices
+        pts  = pos[ai]                   # (M,3)
+
+        vel  = _vel_b(pts)               # (M,3)
+        spd  = np.linalg.norm(vel, axis=1)
+        sdf  = _sdf_b(pts)
+
+        # Kill stalled or near-wall streamlines
+        kill = (spd < config.STREAMLINE_MIN_SPEED) | (sdf < _SDF_MARGIN)
+        alive[ai[kill]] = False
+
+        go   = ~kill
+        if not go.any():
+            continue
+
+        gi   = ai[go]
+        gpts = pts[go];  gspd = spd[go];  gsdf = sdf[go]
+
+        step_m = np.minimum(_MAX_STEP, np.maximum(0.1, gsdf * 0.25))
+        dt     = step_m / (gspd + 1e-6)
+        npos   = _rk4_b(gpts, dt)
+
+        # Out-of-bounds check
+        oob = ((np.abs(npos[:, 0]) > hx) | (np.abs(npos[:, 1]) > hy) |
+               (npos[:, 2] < 0)          | (npos[:, 2] > ht))
+        alive[gi[oob]] = False
+
+        # SDF check on new position; half-step fallback for violations
+        sdf_new = _sdf_b(npos)
+        bad     = sdf_new < 0.0
+
+        if bad.any():
+            bi     = np.where(bad)[0]
+            npos_h = _rk4_b(gpts[bi], dt[bi] * 0.25)
+            sdf_h  = _sdf_b(npos_h)
+            ok     = sdf_h >= 0.0
+            npos[bi[ok]] = npos_h[ok]
+            bad[bi[ok]]  = False
+            truly_bad    = gi[bi[~ok]]
+            stalls[truly_bad] += 1
+            alive[truly_bad[stalls[truly_bad] > 3]] = False
+
+        # Near-wall after step → kill
+        near = _sdf_b(npos) < _SDF_MARGIN
+        alive[gi[near]] = False
+
+        # Commit accepted steps
+        accept = ~oob & ~bad & ~near
+        if accept.any():
+            acc_gi  = gi[accept]
+            acc_spd = gspd[accept]
+            pos[acc_gi] = npos[accept]
+            stalls[acc_gi] = 0
+            for j, i in enumerate(acc_gi):
+                paths[i].append(pos[i].copy())
+                spd_lists[i].append(float(acc_spd[j]))
+
+    return [(np.asarray(paths[i]), np.asarray(spd_lists[i])) for i in range(N)]
+
+
 def _trace(interps, sdf_interp, start, occupancy, domain, max_steps=None):
     pos    = start.copy()
     path   = [pos.copy()]
@@ -171,29 +275,43 @@ def _make_seeds(occupancy, domain, wind_deg):
     # Scale seed counts with domain area relative to the default 200×200 m domain
     _ref_area   = 200.0 * 200.0
     _area_scale = math.sqrt((2 * half_x * 2 * half_y) / _ref_area)
-    _area_scale = max(1.0, _area_scale)
+    _area_scale = max(1.0, min(_area_scale, 4.0))  # cap at 4× to avoid seed explosion
 
-    # Inlet face
-    n_in = int(config.N_SEEDS_INLET * _area_scale)
-    if abs(ca) >= abs(sa):
-        x0 = -math.copysign(half_x * 0.97, ca)
-        ys_ = rng.uniform(-half_y * 0.9, half_y * 0.9, n_in)
-        zs_ = np.concatenate([
-            rng.uniform(2, min(40, height * 0.35), n_in * 2 // 3),
-            rng.uniform(min(40, height * 0.35), height * 0.7, n_in // 3),
+    # Inlet faces — seed both faces the wind is coming from, weighted by their
+    # component magnitude so a pure cardinal wind fills only one face and a
+    # diagonal wind splits proportionally between the two.
+    n_in      = int(config.N_SEEDS_INLET * _area_scale)
+    abs_ca    = abs(ca)
+    abs_sa    = abs(sa)
+    total_c   = abs_ca + abs_sa + 1e-9
+    # Only seed a face if its component is at least 20% of the total —
+    # below that the wind is so predominantly the other direction it's not worth it
+    use_x     = (abs_ca / total_c) >= 0.20
+    use_y     = (abs_sa / total_c) >= 0.20
+    frac_x    = (abs_ca / total_c) if (use_x and use_y) else (1.0 if use_x else 0.0)
+    n_x_face  = int(n_in * frac_x)
+    n_y_face  = n_in - n_x_face
+
+    def _zs_for(n):
+        return np.concatenate([
+            rng.uniform(2, min(40, height * 0.35), n * 2 // 3),
+            rng.uniform(min(40, height * 0.35), height * 0.7, n - n * 2 // 3),
         ])
-        for y, z in zip(ys_, zs_[:len(ys_)]):
+
+    if n_x_face > 0:
+        x0  = -math.copysign(half_x * 0.97, ca)
+        ys_ = rng.uniform(-half_y * 0.9, half_y * 0.9, n_x_face)
+        zs_ = _zs_for(n_x_face)
+        for y, z in zip(ys_, zs_):
             p = np.array([x0, y, z])
             if _free(p):
                 seeds.append(p)
-    else:
-        y0 = -math.copysign(half_y * 0.97, sa)
-        xs_ = rng.uniform(-half_x * 0.9, half_x * 0.9, n_in)
-        zs_ = np.concatenate([
-            rng.uniform(2, min(40, height * 0.35), n_in * 2 // 3),
-            rng.uniform(min(40, height * 0.35), height * 0.7, n_in // 3),
-        ])
-        for x, z in zip(xs_, zs_[:len(xs_)]):
+
+    if n_y_face > 0:
+        y0  = -math.copysign(half_y * 0.97, sa)
+        xs_ = rng.uniform(-half_x * 0.9, half_x * 0.9, n_y_face)
+        zs_ = _zs_for(n_y_face)
+        for x, z in zip(xs_, zs_):
             p = np.array([x, y0, z])
             if _free(p):
                 seeds.append(p)
@@ -282,10 +400,10 @@ def run(occupancy, coords, vel, shape, domain):
     print(f"    Dominant direction: {wind_deg:.0f}°  "
           f"(mean u={mean_v[0]:.2f} v={mean_v[1]:.2f} m/s)")
 
-    # Allow streamlines to cross the full domain diagonal (×1.5 for curved paths)
+    # Allow streamlines to cross the full domain diagonal once, capped at 3000
     max_dim   = 2 * math.sqrt(domain["half_x"]**2 + domain["half_y"]**2)
-    max_steps = max(config.STREAMLINE_MAX_STEPS,
-                    int(max_dim * 1.5 / config.STREAMLINE_DT))
+    max_steps = min(3000, max(config.STREAMLINE_MAX_STEPS,
+                              int(max_dim / config.STREAMLINE_DT)))
     print(f"    Domain diagonal {max_dim:.0f} m → max {max_steps} steps/streamline")
 
     interps    = _build_interps(coords, vel, shape, occupancy, domain)
@@ -303,12 +421,12 @@ def run(occupancy, coords, vel, shape, domain):
     with open(seed_path, "w") as fh:
         json.dump({"points": seed_geo}, fh)
 
+    print(f"    Tracing {len(seeds)} seeds (batch mode) …")
+    traced = _trace_batch(interps, sdf_interp, seeds, occupancy, domain, max_steps)
+
     results = []
     n_short = n_loop = 0
-    for s in seeds:
-        if _inside_building(s, occupancy, domain):
-            continue
-        path, spd = _trace(interps, sdf_interp, s, occupancy, domain, max_steps)
+    for path, spd in traced:
         if len(path) < 3:
             continue
         diffs  = np.diff(path, axis=0)

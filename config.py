@@ -26,16 +26,22 @@ DEST_HEIGHT   = 30.0
 
 GROUND_ELLIPSOID_HEIGHT = 58.0   # updated after heightmap scan
 
+# Optional static wind override — set when a preset supplies measured wind data.
+# Dict with keys 'speed_ms' (float, at 10 m) and 'direction_deg' (float), or None.
+WIND_OVERRIDE = None
+
 _domain_lock = threading.Lock()
 
 
 def set_domain(center_lat, center_lon, half_x, half_y,
                origin_lat, origin_lon, origin_h,
-               dest_lat, dest_lon, dest_h):
+               dest_lat, dest_lon, dest_h,
+               wind_override=None):
     global DOMAIN_CENTER_LAT, DOMAIN_CENTER_LON
     global DOMAIN_HALF_X, DOMAIN_HALF_Y
     global ORIGIN_LAT, ORIGIN_LON, ORIGIN_HEIGHT
     global DEST_LAT, DEST_LON, DEST_HEIGHT
+    global WIND_OVERRIDE
     with _domain_lock:
         DOMAIN_CENTER_LAT = center_lat
         DOMAIN_CENTER_LON = center_lon
@@ -47,6 +53,7 @@ def set_domain(center_lat, center_lon, half_x, half_y,
         DEST_LAT          = dest_lat
         DEST_LON          = dest_lon
         DEST_HEIGHT       = dest_h
+        WIND_OVERRIDE     = wind_override
 
 
 def snapshot():
@@ -64,6 +71,7 @@ def snapshot():
             dest_lon=DEST_LON,
             dest_height=DEST_HEIGHT,
             ground_ellipsoid_height=GROUND_ELLIPSOID_HEIGHT,
+            wind_override=WIND_OVERRIDE,
         )
 
 
@@ -103,8 +111,8 @@ DRONE_CD          = 0.5
 ROUTING_GRID_RES    = 3.0   # metres horizontal
 ROUTING_GRID_RES_Z  = 3.0   # metres vertical
 MIN_ROUTE_CLEARANCE = 5.0   # minimum SDF distance from buildings (m)
-WIND_COST_ALPHA     = 0.35  # headwind penalty weight
-WIND_COST_BETA      = 0.15  # turbulence penalty weight
+WIND_COST_ALPHA     = 0.35  # headwind penalty weight (energy/drag)
+WIND_COST_BETA      = 0.30  # crosswind penalty weight (destabilisation)
 NUM_ROUTE_WAYPOINTS = 60
 
 CUOPT_ENDPOINT  = "https://optimize.api.nvidia.com/v1/nvidia/cuopt"
@@ -116,7 +124,7 @@ NEMOTRON_THRESHOLD = 0.7
 
 # Server
 SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 8080
+SERVER_PORT = 8090
 
 # Paths
 _BASE          = os.path.dirname(os.path.abspath(__file__))

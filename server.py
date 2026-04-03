@@ -90,8 +90,10 @@ def receive_coords():
     half_x = max(dx_m / 2 + 100.0, 150.0)
     half_y = max(dy_m / 2 + 100.0, 150.0)
 
+    wind_override = data.get("wind_override") or None  # e.g. {"speed_ms": 4.12, "direction_deg": 225}
     config.set_domain(mid_lat, mid_lon, half_x, half_y,
-                      o_lat, o_lon, o_h, d_lat, d_lon, d_h)
+                      o_lat, o_lon, o_h, d_lat, d_lon, d_h,
+                      wind_override=wind_override)
 
     cached = config.has_cached_geometry()
     _coords_event.set()

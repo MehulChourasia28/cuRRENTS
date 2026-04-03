@@ -31,9 +31,13 @@ const PRESETS = [
     origin: "51.5160, -0.0820", dest: "51.5130, -0.0815", oh: 95,  dh: 100 },
   // ── Modelling data routes ──────────────────────────────────────────────
   { name: "Guy's → St Thomas's",
-    origin: "51.50254, -0.08788", dest: "51.49914, -0.11759", oh: 40, dh: 40 },
+    origin: "51.50254, -0.08788", dest: "51.49914, -0.11759", oh: 60, dh: 60,
+    // London City Airport (EGLC): mean sustained 8.01 kts = 4.12 m/s, prevailing SW
+    wind: { speed_ms: 4.12, direction_deg: 225 } },
   { name: "The Nelson → St George's",
-    origin: "51.410545, -0.209022", dest: "51.426072, -0.177525", oh: 40, dh: 40 },
+    origin: "51.410545, -0.209022", dest: "51.426072, -0.177525", oh: 60, dh: 60,
+    // Heathrow (EGLL): mean sustained 7.72 kts = 3.97 m/s, prevailing SW
+    wind: { speed_ms: 3.97, direction_deg: 225 } },
 ];
 
 // Pipeline stage → stepper index
@@ -137,16 +141,19 @@ function wireControls() {
   };
 }
 
+let _activePresetWind = null;  // wind override from the selected preset, if any
+
 function applyPreset() {
   const idx    = document.getElementById("preset-route").selectedIndex;
   const fields = document.getElementById("coord-inputs-section");
-  if (idx === 0) { fields && fields.classList.remove("hidden"); return; }
+  if (idx === 0) { fields && fields.classList.remove("hidden"); _activePresetWind = null; return; }
   const p = PRESETS[idx];
   if (!p || !p.origin) return;
   document.getElementById("inp-origin").value   = p.origin;
   document.getElementById("inp-dest").value     = p.dest;
   document.getElementById("inp-origin-h").value = String(p.oh ?? 30);
   document.getElementById("inp-dest-h").value   = String(p.dh ?? 30);
+  _activePresetWind = p.wind || null;
   fields && fields.classList.add("hidden");
 }
 
@@ -205,7 +212,8 @@ async function analyzeRoute() {
     const r = await fetch("/api/coords", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ origin, dest, origin_height: originH, dest_height: destH }),
+      body:    JSON.stringify({ origin, dest, origin_height: originH, dest_height: destH,
+                               wind_override: _activePresetWind || undefined }),
     });
     const result = await r.json();
     if (result.error) { setStatus("Error: " + result.error); return; }
