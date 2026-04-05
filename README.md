@@ -2,7 +2,7 @@
 
 3D wind-aware drone route optimisation over real city geometry, using a GPU Lattice-Boltzmann CFD solver, NVIDIA cuOpt, and CesiumJS with Google Photorealistic 3D Tiles.
 
-[![Demo video](thumbnail.jpg)](https://github.com/MehulChourasia28/cuRRENTS/releases/download/v1.0/ApianXcuRents.mp4)
+![Demo](ApianXcuRents.gif)
 
 ---
 
