@@ -8,7 +8,7 @@
 
 ## Pipeline
 
-1. **Set domain** — enter origin/destination coordinates; domain is computed as the route bounding box + 100 m padding on each side
+1. **Set domain** — enter the origin/destination coordinates; domain is computed as the route bounding box + 100 m padding on each side.
 2. **Scan geometry** — sample Google 3D Tile surface heights to build a voxelised building occupancy grid (2 m resolution, ceiling-rounded to avoid missed building tops)
 3. **Fetch wind** — query OpenWeather at a 5×5 grid across the domain and extrapolate to multiple heights via log-law profile; preset routes use measured station data (EGLC / EGLL) instead
 4. **Nemotron variations** — use NVIDIA NIM to generate physically-plausible wind scenario variations, score each with the reward model, keep those above the correctness threshold
